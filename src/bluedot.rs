@@ -615,17 +615,70 @@ fn read_payloads_from_file(path: &Path) -> anyhow::Result<Vec<BluedotWebhookPayl
     match json {
         Value::Array(values) => values
             .into_iter()
-            .map(serde_json::from_value)
-            .collect::<Result<Vec<BluedotWebhookPayload>, _>>()
+            .map(|value| decode_payload_value(value, path))
+            .collect::<anyhow::Result<Vec<BluedotWebhookPayload>>>()
             .with_context(|| format!("failed to decode payload array from {}", path.display())),
-        Value::Object(_) => serde_json::from_value(json)
-            .map(|payload| vec![payload])
-            .with_context(|| format!("failed to decode payload object from {}", path.display())),
+        Value::Object(_) => decode_payload_value(json, path).map(|payload| vec![payload]),
         _ => bail!(
             "expected a JSON object or array of objects in {}",
             path.display()
         ),
     }
+}
+
+/// Decode a single JSON value as a `BluedotWebhookPayload`.
+///
+/// Supports two formats:
+///
+/// 1. **Flat** (webhook delivery format): `{ "type"|"eventType": "...", "videoId": "...", ... }`
+/// 2. **Envelope** (Bluedot export format): `{ "eventType": "...", "payload": { "meetingId": "...", ... } }`
+///
+/// In the envelope format the inner `payload` object is promoted to the top level. A `videoId`
+/// is synthesised from `meetingId` when absent so that the store can key the record.
+fn decode_payload_value(mut value: Value, path: &Path) -> anyhow::Result<BluedotWebhookPayload> {
+    // Detect the envelope format by the presence of a nested "payload" object.
+    if let Some(inner) = value
+        .get("payload")
+        .filter(|v| v.is_object())
+        .cloned()
+    {
+        // Hoist the outer event type into the inner object so the struct sees it.
+        let event_type = value
+            .get("eventType")
+            .or_else(|| value.get("type"))
+            .cloned();
+        let event_id = value.get("eventId").cloned();
+
+        let mut obj = inner;
+
+        if let (Some(et), Some(obj_map)) = (event_type, obj.as_object_mut()) {
+            obj_map.entry("type").or_insert(et);
+        }
+
+        // Synthesise a videoId from meetingId (sanitised) or eventId when absent.
+        if obj.get("videoId").and_then(Value::as_str).filter(|s| !s.is_empty()).is_none() {
+            let derived = obj
+                .get("meetingId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|id| id.replace('/', "_").replace('.', "_"))
+                .or_else(|| {
+                    event_id
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                });
+            if let (Some(derived_id), Some(obj_map)) = (derived, obj.as_object_mut()) {
+                obj_map.insert("videoId".to_owned(), Value::String(derived_id));
+            }
+        }
+
+        value = obj;
+    }
+
+    serde_json::from_value(value)
+        .with_context(|| format!("failed to decode payload object from {}", path.display()))
 }
 
 fn print_import_summary(source: &Path, db_path: &str, stats: &BluedotImportStats, dry_run: bool) {
@@ -919,6 +972,59 @@ mod tests {
 
         let store = BluedotMeetingStore::new(&config.bluedot.db_path, 365, 100).unwrap();
         assert!(store.get("vid-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn import_envelope_format_transcript() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("envelope.json");
+        fs::write(
+            &path,
+            r#"{"eventId":"evt_1","eventType":"meeting.transcript.created","payload":{"meetingId":"meet.google.com/abc-defg-hij","title":"Standup","createdAt":1761575992,"duration":867.0,"attendees":[{"email":"alice@example.com"}],"transcript":[{"speaker":"Alice","text":"Hi"}]}}
+"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.bluedot.db_path = dir.path().join("bluedot.db").to_string_lossy().to_string();
+
+        let stats = import_payloads_from_path(&config, &path, false, true).unwrap();
+        assert_eq!(stats.created, 1);
+        assert_eq!(stats.failed, 0);
+
+        let store = BluedotMeetingStore::new(&config.bluedot.db_path, 365, 100).unwrap();
+        let meeting = store
+            .get("meet_google_com_abc-defg-hij")
+            .unwrap()
+            .expect("meeting should be stored with sanitised video_id");
+        assert_eq!(meeting.title, "Standup");
+        assert_eq!(meeting.transcript.len(), 1);
+    }
+
+    #[test]
+    fn import_envelope_format_summary() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("envelope_summary.json");
+        fs::write(
+            &path,
+            r#"{"eventId":"evt_2","eventType":"meeting.summary.created","payload":{"meetingId":"meet.google.com/abc-defg-hij","title":"Standup","createdAt":1761575992,"summary":"We shipped it.","attendees":["alice@example.com"]}}
+"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.bluedot.db_path = dir.path().join("bluedot.db").to_string_lossy().to_string();
+
+        let stats = import_payloads_from_path(&config, &path, false, true).unwrap();
+        assert_eq!(stats.created, 1);
+        assert_eq!(stats.failed, 0);
+
+        let store = BluedotMeetingStore::new(&config.bluedot.db_path, 365, 100).unwrap();
+        let meeting = store
+            .get("meet_google_com_abc-defg-hij")
+            .unwrap()
+            .expect("meeting should be stored");
+        assert_eq!(meeting.summary.as_deref(), Some("We shipped it."));
     }
 
     #[test]
