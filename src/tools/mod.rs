@@ -17,6 +17,7 @@
 
 pub mod ask_user;
 pub mod backup_tool;
+pub mod bluedot_meeting;
 pub mod browser;
 pub mod browser_delegate;
 pub mod browser_open;
@@ -116,6 +117,7 @@ pub mod wrappers;
 
 pub use ask_user::AskUserTool;
 pub use backup_tool::BackupTool;
+pub use bluedot_meeting::BluedotMeetingTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 #[allow(unused_imports)]
 pub use browser_delegate::{BrowserDelegateConfig, BrowserDelegateTool};
@@ -652,6 +654,23 @@ pub fn all_tools_with_runtime(
                 security.clone(),
                 root_config.linear.timeout_secs,
             )));
+        }
+    }
+
+    // Bluedot meeting transcripts (config-gated, read-only)
+    if root_config.bluedot.enabled {
+        match BluedotMeetingTool::new(
+            root_config.bluedot.db_path.clone(),
+            root_config.bluedot.allowed_actions.clone(),
+            security.clone(),
+            root_config.bluedot.retention_days,
+            root_config.bluedot.max_meetings,
+        ) {
+            Ok(tool) => tool_arcs.push(Arc::new(tool)),
+            Err(error) => tracing::warn!(
+                "bluedot_meeting: failed to initialize store at {}: {error}",
+                root_config.bluedot.db_path
+            ),
         }
     }
 

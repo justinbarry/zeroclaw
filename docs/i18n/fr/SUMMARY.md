@@ -30,6 +30,7 @@ Dernière mise à jour : **18 février 2026**.
 
 - [setup-guides/README.md](setup-guides/README.md)
 - [one-click-bootstrap.md](setup-guides/one-click-bootstrap.md)
+- [bluedot-setup.md](../../setup-guides/bluedot-setup.md)
 
 ### 2) Référence des commandes, configuration et intégrations
 
@@ -39,6 +40,7 @@ Dernière mise à jour : **18 février 2026**.
 - [channels-reference.md](reference/api/channels-reference.md)
 - [nextcloud-talk-setup.md](setup-guides/nextcloud-talk-setup.md)
 - [config-reference.md](reference/api/config-reference.md)
+- [bluedot-setup.md](../../setup-guides/bluedot-setup.md)
 - [custom-providers.md](contributing/custom-providers.md)
 - [zai-glm-setup.md](setup-guides/zai-glm-setup.md)
 - [langgraph-integration.md](contributing/langgraph-integration.md)

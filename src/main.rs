@@ -74,6 +74,7 @@ fn pause_after_no_command_help() {
 mod agent;
 mod approval;
 mod auth;
+mod bluedot;
 mod channels;
 mod cli_input;
 mod commands;
@@ -415,6 +416,24 @@ Examples:
     Integrations {
         #[command(subcommand)]
         integration_command: IntegrationCommands,
+    },
+
+    /// Import and inspect Bluedot meeting transcript payloads
+    #[command(long_about = "\
+Import Bluedot webhook payloads from disk.
+
+Replays one or more saved webhook payload JSON files into the local \
+Bluedot meeting store without requiring a live webhook endpoint. \
+Directories are scanned recursively and files are merged by videoId \
+using the same normalization path as live ingest.
+
+Examples:
+  zeroclaw bluedot import ./backfill/bluedot-payloads
+  zeroclaw bluedot import ./payloads --dry-run
+  zeroclaw bluedot import ./payloads --fail-fast")]
+    Bluedot {
+        #[command(subcommand)]
+        bluedot_command: BluedotCommands,
     },
 
     /// Manage skills (user-defined capabilities)
@@ -818,6 +837,21 @@ enum MemoryCommands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BluedotCommands {
+    /// Import webhook payload JSON files from a file or directory
+    Import {
+        /// File or directory containing saved Bluedot webhook payloads
+        source: PathBuf,
+        /// Validate and summarize without writing to the database
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop on the first file or payload error
+        #[arg(long)]
+        fail_fast: bool,
     },
 }
 
@@ -1434,6 +1468,16 @@ async fn main() -> Result<()> {
         Commands::Integrations {
             integration_command,
         } => integrations::handle_command(integration_command, &config),
+
+        Commands::Bluedot { bluedot_command } => match bluedot_command {
+            BluedotCommands::Import {
+                source,
+                dry_run,
+                fail_fast,
+            } => {
+                bluedot::import_payloads_from_path(&config, &source, dry_run, fail_fast).map(|_| ())
+            }
+        },
 
         Commands::Skills { skill_command } => skills::handle_command(skill_command, &config),
 
@@ -2756,6 +2800,35 @@ mod tests {
         match cli.command {
             Commands::Onboard { .. } => {}
             other => panic!("expected onboard command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bluedot_import_command_parses() {
+        let cli = Cli::try_parse_from([
+            "zeroclaw",
+            "bluedot",
+            "import",
+            "./payloads",
+            "--dry-run",
+            "--fail-fast",
+        ])
+        .expect("bluedot import command should parse");
+
+        match cli.command {
+            Commands::Bluedot {
+                bluedot_command:
+                    BluedotCommands::Import {
+                        source,
+                        dry_run,
+                        fail_fast,
+                    },
+            } => {
+                assert_eq!(source, PathBuf::from("./payloads"));
+                assert!(dry_run);
+                assert!(fail_fast);
+            }
+            other => panic!("expected bluedot import command, got {other:?}"),
         }
     }
 

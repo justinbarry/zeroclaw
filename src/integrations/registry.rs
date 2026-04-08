@@ -552,6 +552,18 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             },
         },
         IntegrationEntry {
+            name: "Bluedot",
+            description: "Meeting summaries and transcripts",
+            category: IntegrationCategory::Productivity,
+            status_fn: |c| {
+                if c.bluedot.enabled || c.bluedot.webhook_enabled {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
+        },
+        IntegrationEntry {
             name: "Apple Notes",
             description: "Native macOS/iOS notes",
             category: IntegrationCategory::Productivity,

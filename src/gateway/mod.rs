@@ -22,6 +22,7 @@ pub mod static_files;
 pub mod tls;
 pub mod ws;
 
+use crate::bluedot::{BluedotMeetingStore, BluedotWebhookPayload};
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
     WhatsAppChannel, session_backend::SessionBackend, session_sqlite::SqliteSessionBackend,
@@ -137,6 +138,87 @@ fn current_unix_timestamp_millis() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
+}
+
+fn bluedot_webhook_enabled(config: &Config) -> bool {
+    config.bluedot.webhook_enabled
+}
+
+fn resolve_bluedot_webhook_secret(config: &Config) -> Option<String> {
+    std::env::var("BLUEDOT_WEBHOOK_SECRET")
+        .ok()
+        .and_then(|secret| {
+            let secret = secret.trim();
+            (!secret.is_empty()).then(|| secret.to_owned())
+        })
+        .or_else(|| {
+            config
+                .bluedot
+                .webhook_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn bluedot_webhook_timestamp_is_fresh(timestamp_secs: i64) -> bool {
+    let now_secs = current_unix_timestamp_millis() / 1000;
+    (now_secs - timestamp_secs).abs() <= 300
+}
+
+fn verify_bluedot_signature(
+    secret: &str,
+    svix_id: &str,
+    svix_timestamp: &str,
+    body: &[u8],
+    svix_signature: &str,
+) -> bool {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let svix_id = svix_id.trim();
+    let svix_timestamp = svix_timestamp.trim();
+    let svix_signature = svix_signature.trim();
+    if svix_id.is_empty() || svix_timestamp.is_empty() || svix_signature.is_empty() {
+        return false;
+    }
+
+    let timestamp = match svix_timestamp.parse::<i64>() {
+        Ok(timestamp) if bluedot_webhook_timestamp_is_fresh(timestamp) => timestamp,
+        _ => return false,
+    };
+    let _ = timestamp;
+
+    let secret = secret.trim();
+    let secret = secret.strip_prefix("whsec_").unwrap_or(secret);
+    let secret_bytes = match base64::engine::general_purpose::STANDARD.decode(secret) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(&secret_bytes) {
+        Ok(mac) => mac,
+        Err(_) => return false,
+    };
+    let mut signed_content =
+        String::with_capacity(svix_id.len() + svix_timestamp.len() + body.len() + 2);
+    signed_content.push_str(svix_id);
+    signed_content.push('.');
+    signed_content.push_str(svix_timestamp);
+    signed_content.push('.');
+    signed_content.push_str(&String::from_utf8_lossy(body));
+    mac.update(signed_content.as_bytes());
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+    svix_signature.split_whitespace().any(|candidate| {
+        let mut parts = candidate.splitn(2, ',');
+        matches!(
+            (parts.next(), parts.next()),
+            (Some("v1"), Some(value)) if value == expected
+        )
+    })
 }
 
 fn linear_webhook_enabled(config: &Config) -> bool {
@@ -962,6 +1044,9 @@ pub async fn run_gateway(
     if config.linear.webhook_enabled {
         println!("  POST {pfx}/linear    — Linear webhook (signed event ingestion)");
     }
+    if config.bluedot.webhook_enabled {
+        println!("  POST {pfx}/bluedot   — Bluedot webhook (Svix-signed meeting ingestion)");
+    }
     println!("  GET  {pfx}/api/*     — REST API (bearer token required)");
     println!("  GET  {pfx}/ws/chat   — WebSocket agent chat");
     if config.nodes.enabled {
@@ -1092,6 +1177,7 @@ pub async fn run_gateway(
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
         .route("/linear", post(handle_linear_webhook))
+        .route("/bluedot", post(handle_bluedot_webhook))
         .route("/webhook/gmail", post(handle_gmail_push_webhook))
         // ── Claude Code runner hooks ──
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
@@ -2233,6 +2319,149 @@ async fn handle_nextcloud_talk_webhook(
     }
 
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// POST /bluedot — incoming Bluedot webhook (passive transcript ingestion)
+async fn handle_bluedot_webhook(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let rate_key =
+        client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+    if !state.rate_limiter.allow_webhook(&rate_key) {
+        tracing::warn!("/bluedot rate limit exceeded");
+        let err = serde_json::json!({
+            "error": "Too many webhook requests. Please retry later.",
+            "retry_after": RATE_LIMIT_WINDOW_SECS,
+        });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(err));
+    }
+
+    let (enabled, webhook_secret, db_path, retention_days, max_meetings) = {
+        let config = state.config.lock();
+        (
+            bluedot_webhook_enabled(&config),
+            resolve_bluedot_webhook_secret(&config),
+            config.bluedot.db_path.clone(),
+            config.bluedot.retention_days,
+            config.bluedot.max_meetings,
+        )
+    };
+
+    if !enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Bluedot webhook not configured"})),
+        );
+    }
+
+    let Some(webhook_secret) = webhook_secret else {
+        tracing::error!("Bluedot webhook enabled but no signing secret is configured");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Bluedot webhook secret is not configured"})),
+        );
+    };
+
+    let svix_id = headers
+        .get("svix-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let svix_timestamp = headers
+        .get("svix-timestamp")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let svix_signature = headers
+        .get("svix-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_bluedot_signature(
+        &webhook_secret,
+        svix_id,
+        svix_timestamp,
+        &body,
+        svix_signature,
+    ) {
+        tracing::warn!(
+            "Bluedot webhook signature verification failed (id: {}, signature: {})",
+            if svix_id.trim().is_empty() {
+                "missing"
+            } else {
+                "present"
+            },
+            if svix_signature.trim().is_empty() {
+                "missing"
+            } else {
+                "invalid"
+            }
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid signature"})),
+        );
+    }
+
+    if !state
+        .idempotency_store
+        .record_if_new(&format!("bluedot:{svix_id}"))
+    {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "duplicate"})),
+        );
+    }
+
+    let Ok(payload) = serde_json::from_slice::<BluedotWebhookPayload>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    if !payload.is_supported_event_type() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ignored"})),
+        );
+    }
+
+    let store = match BluedotMeetingStore::new(&db_path, retention_days, max_meetings) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::error!("Failed to initialize Bluedot store: {error:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to initialize Bluedot store"})),
+            );
+        }
+    };
+
+    match store.upsert_webhook_payload(&payload) {
+        Ok(meeting) => {
+            tracing::info!(
+                "Bluedot webhook stored {} for video {}",
+                payload.event_type.as_deref().unwrap_or("unknown"),
+                meeting.video_id
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "video_id": meeting.video_id,
+                })),
+            )
+        }
+        Err(error) => {
+            tracing::error!("Failed to store Bluedot webhook payload: {error:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to store meeting payload"})),
+            )
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3670,6 +3899,66 @@ mod tests {
         serde_json::from_str(&linear_webhook_payload(timestamp_ms)).unwrap()
     }
 
+    fn generate_svix_secret() -> String {
+        use base64::Engine as _;
+        format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(generate_test_secret().as_bytes())
+        )
+    }
+
+    fn compute_bluedot_signature(
+        secret: &str,
+        svix_id: &str,
+        svix_timestamp: i64,
+        body: &str,
+    ) -> String {
+        use base64::Engine as _;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let encoded = secret.strip_prefix("whsec_").unwrap_or(secret);
+        let secret_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
+        mac.update(format!("{svix_id}.{svix_timestamp}.{body}").as_bytes());
+        format!(
+            "v1,{}",
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        )
+    }
+
+    fn bluedot_summary_payload() -> String {
+        serde_json::json!({
+            "type": "video.summary.created",
+            "videoId": "video-123",
+            "meetingId": "meet.google.com/abc-defg-hij",
+            "title": "Bluedot webhook smoke test",
+            "createdAt": 1_710_000_000_i64,
+            "duration": 900,
+            "attendees": ["alice@example.com", { "email": "bob@example.com", "name": "Bob" }],
+            "summary": "Reviewed the meeting transcript integration."
+        })
+        .to_string()
+    }
+
+    fn bluedot_transcript_payload() -> String {
+        serde_json::json!({
+            "type": "video.transcript.created",
+            "videoId": "video-123",
+            "meetingId": "meet.google.com/abc-defg-hij",
+            "title": "Bluedot webhook smoke test",
+            "createdAt": 1_710_000_000_i64,
+            "duration": 900,
+            "transcript": [
+                { "speaker": "Alice", "text": "We should store the transcript." },
+                { "speaker": "Bob", "text": "And make it searchable." }
+            ]
+        })
+        .to_string()
+    }
+
     #[test]
     fn linear_signature_valid() {
         let secret = generate_test_secret();
@@ -3687,6 +3976,39 @@ mod tests {
         let signature = compute_linear_signature_hex(&wrong_secret, body);
 
         assert!(!verify_linear_signature(&secret, body, &signature));
+    }
+
+    #[test]
+    fn bluedot_signature_valid() {
+        let secret = generate_svix_secret();
+        let body = bluedot_summary_payload();
+        let timestamp = current_unix_timestamp_millis() / 1000;
+        let signature = compute_bluedot_signature(&secret, "msg-123", timestamp, &body);
+
+        assert!(verify_bluedot_signature(
+            &secret,
+            "msg-123",
+            &timestamp.to_string(),
+            body.as_bytes(),
+            &signature,
+        ));
+    }
+
+    #[test]
+    fn bluedot_signature_invalid_wrong_secret() {
+        let secret = generate_svix_secret();
+        let wrong_secret = generate_svix_secret();
+        let body = bluedot_summary_payload();
+        let timestamp = current_unix_timestamp_millis() / 1000;
+        let signature = compute_bluedot_signature(&wrong_secret, "msg-123", timestamp, &body);
+
+        assert!(!verify_bluedot_signature(
+            &secret,
+            "msg-123",
+            &timestamp.to_string(),
+            body.as_bytes(),
+            &signature,
+        ));
     }
 
     #[test]
@@ -3890,6 +4212,174 @@ mod tests {
         let payload = second.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(parsed["status"], "duplicate");
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_returns_not_found_when_not_configured() {
+        let state = linear_webhook_test_state(Config::default(), Arc::new(MockMemory));
+
+        let response = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{}"#),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_rejects_invalid_signature() {
+        let secret = generate_svix_secret();
+        let mut config = Config::default();
+        config.bluedot.webhook_enabled = true;
+        config.bluedot.webhook_secret = Some(secret);
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("svix-id", HeaderValue::from_static("msg-1"));
+        headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&(current_unix_timestamp_millis() / 1000).to_string()).unwrap(),
+        );
+        headers.insert("svix-signature", HeaderValue::from_static("v1,deadbeef"));
+
+        let response = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(bluedot_summary_payload()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_rejects_stale_timestamp() {
+        let secret = generate_svix_secret();
+        let mut config = Config::default();
+        config.bluedot.webhook_enabled = true;
+        config.bluedot.webhook_secret = Some(secret.clone());
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let body = bluedot_summary_payload();
+        let timestamp = (current_unix_timestamp_millis() / 1000) - 600;
+        let signature = compute_bluedot_signature(&secret, "msg-1", timestamp, &body);
+        let mut headers = HeaderMap::new();
+        headers.insert("svix-id", HeaderValue::from_static("msg-1"));
+        headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&timestamp.to_string()).unwrap(),
+        );
+        headers.insert("svix-signature", HeaderValue::from_str(&signature).unwrap());
+
+        let response = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_merges_summary_and_transcript() {
+        let secret = generate_svix_secret();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.bluedot.webhook_enabled = true;
+        config.bluedot.webhook_secret = Some(secret.clone());
+        config.bluedot.db_path = tmp.path().join("bluedot.db").to_string_lossy().to_string();
+        let state = linear_webhook_test_state(config.clone(), Arc::new(MockMemory));
+
+        let summary_body = bluedot_summary_payload();
+        let summary_timestamp = current_unix_timestamp_millis() / 1000;
+        let summary_signature =
+            compute_bluedot_signature(&secret, "msg-summary", summary_timestamp, &summary_body);
+        let mut summary_headers = HeaderMap::new();
+        summary_headers.insert("svix-id", HeaderValue::from_static("msg-summary"));
+        summary_headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&summary_timestamp.to_string()).unwrap(),
+        );
+        summary_headers.insert(
+            "svix-signature",
+            HeaderValue::from_str(&summary_signature).unwrap(),
+        );
+
+        let first = handle_bluedot_webhook(
+            State(state.clone()),
+            test_connect_info(),
+            summary_headers,
+            Bytes::from(summary_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let transcript_body = bluedot_transcript_payload();
+        let transcript_timestamp = current_unix_timestamp_millis() / 1000;
+        let transcript_signature = compute_bluedot_signature(
+            &secret,
+            "msg-transcript",
+            transcript_timestamp,
+            &transcript_body,
+        );
+        let mut transcript_headers = HeaderMap::new();
+        transcript_headers.insert("svix-id", HeaderValue::from_static("msg-transcript"));
+        transcript_headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&transcript_timestamp.to_string()).unwrap(),
+        );
+        transcript_headers.insert(
+            "svix-signature",
+            HeaderValue::from_str(&transcript_signature).unwrap(),
+        );
+
+        let second = handle_bluedot_webhook(
+            State(state.clone()),
+            test_connect_info(),
+            transcript_headers.clone(),
+            Bytes::from(transcript_body.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let duplicate = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            transcript_headers,
+            Bytes::from(transcript_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+
+        let duplicate_payload = duplicate.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&duplicate_payload).unwrap();
+        assert_eq!(parsed["status"], "duplicate");
+
+        let store = BluedotMeetingStore::new(
+            &config.bluedot.db_path,
+            config.bluedot.retention_days,
+            config.bluedot.max_meetings,
+        )
+        .unwrap();
+        let meeting = store.get("video-123").unwrap().unwrap();
+        assert_eq!(
+            meeting.summary.as_deref(),
+            Some("Reviewed the meeting transcript integration.")
+        );
+        assert_eq!(meeting.transcript.len(), 2);
+        assert_eq!(meeting.attendees.len(), 2);
     }
 
     fn compute_nextcloud_signature_hex(secret: &str, random: &str, body: &str) -> String {

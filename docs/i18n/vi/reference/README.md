@@ -13,6 +13,7 @@ Tra cứu lệnh, provider, channel, config và tích hợp.
 
 - Endpoint provider tùy chỉnh: [../custom-providers.md](../custom-providers.md)
 - Tích hợp provider Z.AI / GLM: [../zai-glm-setup.md](../zai-glm-setup.md)
+- Tích hợp transcript cuộc họp Bluedot (English): [../../setup-guides/bluedot-setup.md](../../setup-guides/bluedot-setup.md)
 - Các mẫu tích hợp dựa trên LangGraph: [../langgraph-integration.md](../langgraph-integration.md)
 
 ## Cách dùng

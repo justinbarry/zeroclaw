@@ -550,6 +550,46 @@ webhook_automation_issue_prefixes = ["JB"]
 
 See [linear-setup.md](../../setup-guides/linear-setup.md) for the end-to-end setup and rollout checklist.
 
+## `[bluedot]`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | Enable the `bluedot_meeting` tool |
+| `webhook_enabled` | `false` | Enable signed Bluedot ingestion on `POST /bluedot` |
+| `webhook_secret` | unset | Svix signing secret for Bluedot webhooks |
+| `allowed_actions` | full read set | Allowed `bluedot_meeting` actions |
+| `db_path` | `~/.zeroclaw/bluedot-meetings.db` | SQLite database path for stored meetings |
+| `retention_days` | `365` | Prune meetings older than this many days |
+| `max_meetings` | `500` | Cap stored meeting count after pruning |
+
+Supported tool actions:
+
+- `recent`
+- `get`
+- `search`
+- `transcript`
+
+Notes:
+
+- `BLUEDOT_WEBHOOK_SECRET` overrides `webhook_secret` when set.
+- The Bluedot database is separate from the standard memory backend.
+- `search` matches against title, summary, transcript text, and attendee text.
+- V1 is passive ingest plus query tooling only. No automatic agent dispatch runs on new meetings.
+
+Recommended setup:
+
+```toml
+[bluedot]
+enabled = true
+webhook_enabled = true
+allowed_actions = ["recent", "get", "search", "transcript"]
+db_path = "~/.zeroclaw/bluedot-meetings.db"
+retention_days = 365
+max_meetings = 500
+```
+
+See [bluedot-setup.md](../../setup-guides/bluedot-setup.md) for the endpoint and webhook setup steps.
+
 ## `[gateway]`
 
 | Key | Default | Purpose |

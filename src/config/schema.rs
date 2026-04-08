@@ -375,6 +375,10 @@ pub struct Config {
     #[serde(default)]
     pub linear: LinearConfig,
 
+    /// Bluedot meeting transcript integration configuration (`[bluedot]`).
+    #[serde(default)]
+    pub bluedot: BluedotConfig,
+
     /// Secure inter-node transport configuration (`[node_transport]`).
     #[serde(default)]
     pub node_transport: NodeTransportConfig,
@@ -8227,6 +8231,85 @@ impl Default for LinearConfig {
     }
 }
 
+/// Bluedot meeting transcript integration configuration (`[bluedot]`).
+///
+/// When `enabled = true`, registers the `bluedot_meeting` tool which can list
+/// recent meetings, fetch a single meeting, search across summaries and
+/// transcript text, and page through stored transcript segments.
+///
+/// When `webhook_enabled = true`, the gateway exposes `POST /bluedot` to
+/// receive Svix-signed Bluedot meeting webhooks and persist merged meeting
+/// records into the local SQLite store.
+///
+/// ## Defaults
+/// - `enabled`: `false`
+/// - `webhook_enabled`: `false`
+/// - `allowed_actions`: `["recent", "get", "search", "transcript"]`
+/// - `db_path`: `"~/.zeroclaw/bluedot-meetings.db"`
+/// - `retention_days`: `365`
+/// - `max_meetings`: `500`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BluedotConfig {
+    /// Enable the `bluedot_meeting` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable signed webhook ingestion on gateway `POST /bluedot`. Default: `false`.
+    #[serde(default)]
+    pub webhook_enabled: bool,
+    /// Bluedot Svix signing secret. Encrypted at rest. Falls back to
+    /// `BLUEDOT_WEBHOOK_SECRET`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Allowed `bluedot_meeting` tool actions.
+    /// Valid values: `"recent"`, `"get"`, `"search"`, `"transcript"`.
+    #[serde(default = "default_bluedot_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// SQLite database path for persisted meeting data.
+    #[serde(default = "default_bluedot_db_path")]
+    pub db_path: String,
+    /// Number of days to retain meetings before pruning.
+    #[serde(default = "default_bluedot_retention_days")]
+    pub retention_days: u32,
+    /// Maximum number of meetings to retain after pruning.
+    #[serde(default = "default_bluedot_max_meetings")]
+    pub max_meetings: usize,
+}
+
+fn default_bluedot_allowed_actions() -> Vec<String> {
+    vec![
+        "recent".to_string(),
+        "get".to_string(),
+        "search".to_string(),
+        "transcript".to_string(),
+    ]
+}
+
+fn default_bluedot_db_path() -> String {
+    "~/.zeroclaw/bluedot-meetings.db".into()
+}
+
+fn default_bluedot_retention_days() -> u32 {
+    365
+}
+
+fn default_bluedot_max_meetings() -> usize {
+    500
+}
+
+impl Default for BluedotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_enabled: false,
+            webhook_secret: None,
+            allowed_actions: default_bluedot_allowed_actions(),
+            db_path: default_bluedot_db_path(),
+            retention_days: default_bluedot_retention_days(),
+            max_meetings: default_bluedot_max_meetings(),
+        }
+    }
+}
+
 ///
 /// Controls the read-only cloud transformation analysis tools:
 /// IaC review, migration assessment, cost analysis, and architecture review.
@@ -8493,6 +8576,7 @@ impl Default for Config {
             trust: crate::trust::TrustConfig::default(),
             backup: BackupConfig::default(),
             data_retention: DataRetentionConfig::default(),
+            bluedot: BluedotConfig::default(),
             cloud_ops: CloudOpsConfig::default(),
             conversational_ai: ConversationalAiConfig::default(),
             security: SecurityConfig::default(),
@@ -9494,6 +9578,11 @@ impl Config {
                 &mut config.linear.webhook_secret,
                 "config.linear.webhook_secret",
             )?;
+            decrypt_optional_secret(
+                &store,
+                &mut config.bluedot.webhook_secret,
+                "config.bluedot.webhook_secret",
+            )?;
 
             config.apply_env_overrides();
             config.validate()?;
@@ -10251,6 +10340,48 @@ impl Config {
                     "linear.webhook_automation_issue_prefixes must not contain empty values"
                 );
             }
+        }
+
+        // Bluedot
+        if self.bluedot.enabled || self.bluedot.webhook_enabled {
+            if self.bluedot.db_path.trim().is_empty() {
+                anyhow::bail!("bluedot.db_path must not be empty when bluedot is enabled");
+            }
+            if self.bluedot.retention_days == 0 {
+                anyhow::bail!("bluedot.retention_days must be greater than 0");
+            }
+            if self.bluedot.max_meetings == 0 {
+                anyhow::bail!("bluedot.max_meetings must be greater than 0");
+            }
+        }
+        if self.bluedot.enabled {
+            let valid_actions = ["recent", "get", "search", "transcript"];
+            for action in &self.bluedot.allowed_actions {
+                if !valid_actions.contains(&action.as_str()) {
+                    anyhow::bail!(
+                        "bluedot.allowed_actions contains unknown action: '{}'. \
+                         Valid: recent, get, search, transcript",
+                        action
+                    );
+                }
+            }
+        }
+        if self.bluedot.webhook_enabled
+            && self
+                .bluedot
+                .webhook_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .is_none()
+            && std::env::var("BLUEDOT_WEBHOOK_SECRET")
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            anyhow::bail!(
+                "bluedot.webhook_secret must be set (or BLUEDOT_WEBHOOK_SECRET env var) when bluedot.webhook_enabled = true"
+            );
         }
 
         // Nevis IAM — delegate to NevisConfig::validate() for field-level checks
@@ -11093,6 +11224,11 @@ impl Config {
             &mut config_to_save.linear.webhook_secret,
             "config.linear.webhook_secret",
         )?;
+        encrypt_optional_secret(
+            &store,
+            &mut config_to_save.bluedot.webhook_secret,
+            "config.bluedot.webhook_secret",
+        )?;
 
         let toml_str =
             toml::to_string_pretty(&config_to_save).context("Failed to serialize config")?;
@@ -11736,6 +11872,7 @@ auto_save = true
             trust: crate::trust::TrustConfig::default(),
             backup: BackupConfig::default(),
             data_retention: DataRetentionConfig::default(),
+            bluedot: BluedotConfig::default(),
             cloud_ops: CloudOpsConfig::default(),
             conversational_ai: ConversationalAiConfig::default(),
             security: SecurityConfig::default(),
@@ -12380,6 +12517,7 @@ default_temperature = 0.7
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
             linear: LinearConfig::default(),
+            bluedot: BluedotConfig::default(),
             node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
@@ -16287,6 +16425,35 @@ require_otp_to_resume = true
 
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("linear.webhook_automation_issue_prefixes"));
+    }
+
+    #[test]
+    async fn config_validate_accepts_bluedot_webhook_with_secret() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_webhook_without_secret() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = None;
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.webhook_secret must be set"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_unknown_action() {
+        let mut cfg = Config::default();
+        cfg.bluedot.enabled = true;
+        cfg.bluedot.allowed_actions = vec!["recent".into(), "destroy".into()];
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.allowed_actions"));
     }
 
     // ── Bootstrap files ─────────────────────────────────────

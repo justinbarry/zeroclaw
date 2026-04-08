@@ -9,6 +9,7 @@
 3. macOSでのアップデートまたはアンインストール: [macos-update-uninstall.md](macos-update-uninstall.md)
 4. タスクからコマンドを探す: [../reference/cli/commands-reference.md](../reference/cli/commands-reference.md)
 5. MCPサーバーの登録: [mcp-setup.md](mcp-setup.md)
+6. Bluedot 会議文字起こし連携（英語）: [../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)
 
 ## パスを選択する
 
@@ -33,3 +34,4 @@
 - ランタイム操作: [../ops/README.md](../ops/README.md)
 - リファレンスカタログ: [../reference/README.md](../reference/README.md)
 - macOS ライフサイクルタスク: [macos-update-uninstall.md](macos-update-uninstall.md)
+- Bluedot 会議文字起こし連携（英語）: [../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)

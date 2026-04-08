@@ -8,6 +8,7 @@
 2. 一键安装和双引导模式：[one-click-bootstrap.zh-CN.md](one-click-bootstrap.zh-CN.md)
 3. macOS 上的更新或卸载：[macos-update-uninstall.zh-CN.md](macos-update-uninstall.zh-CN.md)
 4. 按任务查找命令：[../reference/cli/commands-reference.zh-CN.md](../reference/cli/commands-reference.zh-CN.md)
+5. Bluedot 会议转录接入（英文）：[../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)
 
 ## 选择你的路径
 
@@ -32,3 +33,4 @@
 - 运行时操作：[../ops/README.zh-CN.md](../ops/README.zh-CN.md)
 - 参考目录：[../reference/README.zh-CN.md](../reference/README.zh-CN.md)
 - macOS 生命周期任务：[macos-update-uninstall.zh-CN.md](macos-update-uninstall.zh-CN.md)
+- Bluedot 会议转录接入（英文）：[../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)

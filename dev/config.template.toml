@@ -27,6 +27,18 @@ require_pairing = false
 # [autonomy]
 # always_ask = ["linear.write"]
 
+# Bluedot meeting transcript integration
+# Use env vars in production when possible:
+#   export BLUEDOT_WEBHOOK_SECRET='whsec_...'
+#
+# [bluedot]
+# enabled = true
+# webhook_enabled = true
+# allowed_actions = ["recent", "get", "search", "transcript"]
+# db_path = "~/.zeroclaw/bluedot-meetings.db"
+# retention_days = 365
+# max_meetings = 500
+
 # Cost tracking and budget enforcement configuration
 # Enable to track API usage costs and enforce spending limits
 [cost]

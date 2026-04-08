@@ -81,6 +81,7 @@ Last refreshed: **February 18, 2026**.
 - [one-click-bootstrap.md](setup-guides/one-click-bootstrap.md)
 - [mcp-setup.md](setup-guides/mcp-setup.md)
 - [linear-setup.md](setup-guides/linear-setup.md)
+- [bluedot-setup.md](setup-guides/bluedot-setup.md)
 
 ### 2) Command/Config References & Integrations
 

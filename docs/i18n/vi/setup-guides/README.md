@@ -7,6 +7,7 @@ Dành cho cài đặt lần đầu và làm quen nhanh.
 1. Tổng quan và khởi động nhanh: [../../README.vi.md](../../README.vi.md)
 2. Cài đặt một lệnh và chế độ bootstrap kép: [one-click-bootstrap.md](one-click-bootstrap.md)
 3. Tìm lệnh theo tác vụ: [../reference/cli/commands-reference.md](../reference/cli/commands-reference.md)
+4. Tích hợp transcript cuộc họp Bluedot (English): [../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)
 
 ## Chọn hướng đi
 
@@ -27,3 +28,4 @@ Dành cho cài đặt lần đầu và làm quen nhanh.
 
 - Vận hành runtime: [../ops/README.md](../ops/README.md)
 - Tra cứu tham khảo: [../reference/README.md](../reference/README.md)
+- Tích hợp transcript cuộc họp Bluedot (English): [../../../setup-guides/bluedot-setup.md](../../../setup-guides/bluedot-setup.md)
