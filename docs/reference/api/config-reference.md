@@ -525,8 +525,8 @@ Notes:
 
 Supported tool actions:
 
-- Read helpers: `get_issue`, `search_issues`, `list_comments`, `get_project`, `search_projects`, `list_teams`, `list_users`, `list_workflow_states`, `graphql_query`
-- Write helpers: `create_comment`, `create_issue`, `update_issue`, `update_project`, `graphql_mutation`
+- Read helpers: `get_issue`, `search_issues`, `list_comments`, `get_project`, `get_document`, `list_project_documents`, `search_projects`, `list_teams`, `list_users`, `list_workflow_states`, `graphql_query`
+- Write helpers: `create_comment`, `create_issue`, `update_issue`, `create_document`, `update_project`, `update_document`, `graphql_mutation`
 
 Notes:
 
@@ -589,7 +589,7 @@ Notes:
 - `allowed_commands` entries can be command names (for example, `"git"`), explicit executable paths (for example, `"/usr/bin/antigravity"`), or `"*"` to allow any command name/path (risk gates still apply).
 - Shell separator/operator parsing is quote-aware. Characters like `;` inside quoted arguments are treated as literals, not command separators.
 - Unquoted shell chaining/operators are still enforced by policy checks (`;`, `|`, `&&`, `||`, background chaining, and redirects).
-- A recommended production pattern for Linear is `always_ask = ["linear.write"]` so all issue/project/comment mutations require approval.
+- A recommended production pattern for Linear is `always_ask = ["linear.write"]` so all issue/project/comment/document mutations require approval.
 
 ```toml
 [autonomy]

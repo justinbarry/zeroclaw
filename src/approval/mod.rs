@@ -208,7 +208,7 @@ pub fn approval_key(tool_name: &str, args: &Value) -> String {
         "linear" => match args.get("action").and_then(Value::as_str) {
             Some(
                 "create_comment" | "create_issue" | "update_issue" | "update_project"
-                | "graphql_mutation",
+                | "create_document" | "update_document" | "graphql_mutation",
             ) => "linear.write".to_string(),
             _ => tool_name.to_string(),
         },
@@ -645,6 +645,14 @@ mod tests {
         );
         assert_eq!(
             approval_key("linear", &serde_json::json!({"action": "update_project"})),
+            "linear.write"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "create_document"})),
+            "linear.write"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "update_document"})),
             "linear.write"
         );
         assert_eq!(

@@ -8126,15 +8126,16 @@ impl Default for JiraConfig {
 /// Linear integration configuration (`[linear]`).
 ///
 /// When `enabled = true`, registers the `linear` tool which can query issues
-/// and projects, search issues and projects, list comments/teams/users/workflow
-/// states, add comments, create issues, update issues, update projects, and run
-/// raw GraphQL queries or mutations.
+/// and projects, fetch and manage project documents, search issues and
+/// projects, list comments/teams/users/workflow states, add comments, create
+/// issues, update issues, update projects, and run raw GraphQL queries or
+/// mutations.
 /// Requires `api_key` (or the `LINEAR_API_KEY` env var).
 ///
 /// ## Defaults
 /// - `enabled`: `false`
 /// - `api_url`: `"https://api.linear.app/graphql"`
-/// - `allowed_actions`: `["get_issue", "search_issues", "list_comments", "get_project", "search_projects", "list_teams", "list_users", "list_workflow_states", "graphql_query"]`
+/// - `allowed_actions`: `["get_issue", "search_issues", "list_comments", "get_project", "get_document", "list_project_documents", "search_projects", "list_teams", "list_users", "list_workflow_states", "graphql_query"]`
 /// - `timeout_secs`: `30`
 /// - `webhook_enabled`: `false`
 /// - `webhook_automation_enabled`: `false`
@@ -8155,10 +8156,11 @@ pub struct LinearConfig {
     pub api_key: String,
     /// Actions the agent is permitted to call.
     /// Valid values: `"get_issue"`, `"search_issues"`, `"list_comments"`,
-    /// `"create_comment"`, `"create_issue"`, `"update_issue"`,
-    /// `"get_project"`, `"search_projects"`, `"list_teams"`, `"list_users"`,
-    /// `"list_workflow_states"`, `"update_project"`, `"graphql_query"`,
-    /// `"graphql_mutation"`.
+    /// `"create_comment"`, `"create_issue"`, `"update_issue"`, `"get_project"`,
+    /// `"get_document"`, `"list_project_documents"`, `"search_projects"`,
+    /// `"list_teams"`, `"list_users"`, `"list_workflow_states"`,
+    /// `"create_document"`, `"update_project"`, `"update_document"`,
+    /// `"graphql_query"`, `"graphql_mutation"`.
     #[serde(default = "default_linear_allowed_actions")]
     pub allowed_actions: Vec<String>,
     /// Request timeout in seconds. Default: `30`.
@@ -8194,6 +8196,8 @@ fn default_linear_allowed_actions() -> Vec<String> {
         "search_issues".to_string(),
         "list_comments".to_string(),
         "get_project".to_string(),
+        "get_document".to_string(),
+        "list_project_documents".to_string(),
         "search_projects".to_string(),
         "list_teams".to_string(),
         "list_users".to_string(),
@@ -10185,11 +10189,15 @@ impl Config {
                 "create_issue",
                 "update_issue",
                 "get_project",
+                "get_document",
+                "list_project_documents",
                 "search_projects",
                 "list_teams",
                 "list_users",
                 "list_workflow_states",
+                "create_document",
                 "update_project",
+                "update_document",
                 "graphql_query",
                 "graphql_mutation",
             ];
@@ -10197,7 +10205,7 @@ impl Config {
                 if !valid_actions.contains(&action.as_str()) {
                     anyhow::bail!(
                         "linear.allowed_actions contains unknown action: '{}'. \
-                         Valid: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, search_projects, list_teams, list_users, list_workflow_states, update_project, graphql_query, graphql_mutation",
+                         Valid: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, get_document, list_project_documents, search_projects, list_teams, list_users, list_workflow_states, create_document, update_project, update_document, graphql_query, graphql_mutation",
                         action
                     );
                 }

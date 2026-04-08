@@ -122,6 +122,57 @@ query GetProject($id: String!) {
 }
 "#;
 
+const GET_DOCUMENT_QUERY: &str = r#"
+query GetDocument($id: String!) {
+  document(id: $id) {
+    id
+    title
+    summary
+    content
+    icon
+    color
+    slugId
+    sortOrder
+    url
+    createdAt
+    updatedAt
+    creator { id name displayName email active url }
+    updatedBy { id name displayName email active url }
+    project { id name description slugId icon color targetDate startDate priority url }
+  }
+}
+"#;
+
+const LIST_PROJECT_DOCUMENTS_QUERY: &str = r#"
+query ListProjectDocuments($id: String!, $first: Int!, $includeArchived: Boolean!) {
+  project(id: $id) {
+    id
+    name
+    documents(first: $first, includeArchived: $includeArchived) {
+      nodes {
+        id
+        title
+        summary
+        icon
+        color
+        slugId
+        sortOrder
+        url
+        createdAt
+        updatedAt
+        creator { id name displayName email active url }
+        updatedBy { id name displayName email active url }
+        project { id name description slugId icon color targetDate startDate priority url }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
 const SEARCH_PROJECTS_QUERY: &str = r#"
 query SearchProjects($term: String!, $first: Int!) {
   searchProjects(term: $term, first: $first) {
@@ -308,6 +359,54 @@ mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {
       labels {
         nodes { id name color }
       }
+    }
+  }
+}
+"#;
+
+const CREATE_DOCUMENT_MUTATION: &str = r#"
+mutation CreateDocument($input: DocumentCreateInput!) {
+  documentCreate(input: $input) {
+    success
+    document {
+      id
+      title
+      summary
+      content
+      icon
+      color
+      slugId
+      sortOrder
+      url
+      createdAt
+      updatedAt
+      creator { id name displayName email active url }
+      updatedBy { id name displayName email active url }
+      project { id name description slugId icon color targetDate startDate priority url }
+    }
+  }
+}
+"#;
+
+const UPDATE_DOCUMENT_MUTATION: &str = r#"
+mutation UpdateDocument($id: String!, $input: DocumentUpdateInput!) {
+  documentUpdate(id: $id, input: $input) {
+    success
+    document {
+      id
+      title
+      summary
+      content
+      icon
+      color
+      slugId
+      sortOrder
+      url
+      createdAt
+      updatedAt
+      creator { id name displayName email active url }
+      updatedBy { id name displayName email active url }
+      project { id name description slugId icon color targetDate startDate priority url }
     }
   }
 }
@@ -680,6 +779,56 @@ impl LinearTool {
         json_tool_result(&project)
     }
 
+    async fn get_document(&self, args: &Value) -> anyhow::Result<ToolResult> {
+        let document_id = trimmed(args.get("document_id").and_then(Value::as_str))
+            .ok_or_else(|| anyhow::anyhow!("get_document requires document_id"))?;
+
+        let data = self
+            .graphql::<GetDocumentData>(GET_DOCUMENT_QUERY, json!({ "id": document_id }), None)
+            .await?;
+
+        let Some(document) = data.document else {
+            anyhow::bail!("Linear document was not found");
+        };
+
+        json_tool_result(&document)
+    }
+
+    async fn list_project_documents(&self, args: &Value) -> anyhow::Result<ToolResult> {
+        let project_id = trimmed(args.get("project_id").and_then(Value::as_str))
+            .ok_or_else(|| anyhow::anyhow!("list_project_documents requires project_id"))?;
+        let limit = clamp_limit(args.get("limit").and_then(Value::as_u64));
+        let include_archived = args
+            .get("include_archived")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let data = self
+            .graphql::<ListProjectDocumentsData>(
+                LIST_PROJECT_DOCUMENTS_QUERY,
+                json!({
+                    "id": project_id,
+                    "first": limit,
+                    "includeArchived": include_archived,
+                }),
+                None,
+            )
+            .await?;
+
+        let Some(project) = data.project else {
+            anyhow::bail!("Linear project was not found");
+        };
+
+        json_tool_result(&json!({
+            "project": {
+                "id": project.id,
+                "name": project.name,
+            },
+            "documents": project.documents.nodes,
+            "page_info": project.documents.page_info,
+        }))
+    }
+
     async fn search_projects(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let term = trimmed(args.get("term").and_then(Value::as_str))
             .ok_or_else(|| anyhow::anyhow!("search_projects requires term"))?;
@@ -756,6 +905,30 @@ impl LinearTool {
         }))
     }
 
+    async fn create_document(&self, args: &Value) -> anyhow::Result<ToolResult> {
+        let input = build_document_create_input(args)?;
+
+        let data = self
+            .graphql::<DocumentCreateData>(
+                CREATE_DOCUMENT_MUTATION,
+                json!({
+                    "input": input,
+                }),
+                None,
+            )
+            .await?;
+
+        if !data.document_create.success {
+            anyhow::bail!("Linear create_document returned success=false");
+        }
+
+        let Some(document) = data.document_create.document else {
+            anyhow::bail!("Linear create_document succeeded but returned no document payload");
+        };
+
+        json_tool_result(&document)
+    }
+
     async fn update_project(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let project_id = trimmed(args.get("project_id").and_then(Value::as_str))
             .ok_or_else(|| anyhow::anyhow!("update_project requires project_id"))?;
@@ -781,6 +954,33 @@ impl LinearTool {
         };
 
         json_tool_result(&project)
+    }
+
+    async fn update_document(&self, args: &Value) -> anyhow::Result<ToolResult> {
+        let document_id = trimmed(args.get("document_id").and_then(Value::as_str))
+            .ok_or_else(|| anyhow::anyhow!("update_document requires document_id"))?;
+        let input = build_document_update_input(args)?;
+
+        let data = self
+            .graphql::<DocumentUpdateData>(
+                UPDATE_DOCUMENT_MUTATION,
+                json!({
+                    "id": document_id,
+                    "input": input,
+                }),
+                None,
+            )
+            .await?;
+
+        if !data.document_update.success {
+            anyhow::bail!("Linear update_document returned success=false");
+        }
+
+        let Some(document) = data.document_update.document else {
+            anyhow::bail!("Linear update_document succeeded but returned no document payload");
+        };
+
+        json_tool_result(&document)
     }
 }
 
@@ -809,11 +1009,15 @@ impl Tool for LinearTool {
                     "create_issue",
                     "update_issue",
                     "get_project",
+                    "get_document",
+                    "list_project_documents",
                     "search_projects",
                     "list_teams",
                     "list_users",
                     "list_workflow_states",
+                    "create_document",
                     "update_project",
+                    "update_document",
                     "graphql_query",
                     "graphql_mutation"
                   ],
@@ -901,7 +1105,11 @@ impl Tool for LinearTool {
                 },
                 "project_id": {
                   "type": "string",
-                  "description": "Project UUID for get_project, update_project, create_issue, or update_issue."
+                  "description": "Project UUID for get_project, list_project_documents, create_document, update_project, create_issue, or update_issue."
+                },
+                "document_id": {
+                  "type": "string",
+                  "description": "Linear document UUID for get_document or update_document."
                 },
                 "team_update_id": {
                   "type": "string",
@@ -932,15 +1140,15 @@ impl Tool for LinearTool {
                 },
                 "content": {
                   "type": "string",
-                  "description": "Long-form project content for update_project."
+                  "description": "Long-form markdown content for create_document, update_document, or update_project."
                 },
                 "icon": {
                   "type": "string",
-                  "description": "Project icon for update_project."
+                  "description": "Icon for create_document, update_document, or update_project."
                 },
                 "color": {
                   "type": "string",
-                  "description": "Project color for update_project."
+                  "description": "Color for create_document, update_document, or update_project."
                 },
                 "status_id": {
                   "type": "string",
@@ -967,6 +1175,10 @@ impl Tool for LinearTool {
                   "type": "array",
                   "items": { "type": "string" },
                   "description": "Replace project members with these UUIDs for update_project."
+                },
+                "sort_order": {
+                  "type": "number",
+                  "description": "Document sort order for create_document or update_document."
                 }
               },
               "required": ["action"]
@@ -996,11 +1208,15 @@ impl Tool for LinearTool {
                 | "create_issue"
                 | "update_issue"
                 | "get_project"
+                | "get_document"
+                | "list_project_documents"
                 | "search_projects"
                 | "list_teams"
                 | "list_users"
                 | "list_workflow_states"
+                | "create_document"
                 | "update_project"
+                | "update_document"
                 | "graphql_query"
                 | "graphql_mutation"
         ) {
@@ -1008,7 +1224,7 @@ impl Tool for LinearTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Unknown action: '{action}'. Valid actions: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, search_projects, list_teams, list_users, list_workflow_states, update_project, graphql_query, graphql_mutation"
+                    "Unknown action: '{action}'. Valid actions: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, get_document, list_project_documents, search_projects, list_teams, list_users, list_workflow_states, create_document, update_project, update_document, graphql_query, graphql_mutation"
                 )),
             });
         }
@@ -1029,13 +1245,15 @@ impl Tool for LinearTool {
             | "search_issues"
             | "list_comments"
             | "get_project"
+            | "get_document"
+            | "list_project_documents"
             | "search_projects"
             | "list_teams"
             | "list_users"
             | "list_workflow_states"
             | "graphql_query" => ToolOperation::Read,
-            "create_comment" | "create_issue" | "update_issue" | "update_project"
-            | "graphql_mutation" => ToolOperation::Act,
+            "create_comment" | "create_issue" | "update_issue" | "create_document"
+            | "update_project" | "update_document" | "graphql_mutation" => ToolOperation::Act,
             _ => unreachable!(),
         };
 
@@ -1058,11 +1276,15 @@ impl Tool for LinearTool {
             "create_issue" => self.create_issue(&args).await,
             "update_issue" => self.update_issue(&args).await,
             "get_project" => self.get_project(&args).await,
+            "get_document" => self.get_document(&args).await,
+            "list_project_documents" => self.list_project_documents(&args).await,
             "search_projects" => self.search_projects(&args).await,
             "list_teams" => self.list_teams(&args).await,
             "list_users" => self.list_users(&args).await,
             "list_workflow_states" => self.list_workflow_states(&args).await,
+            "create_document" => self.create_document(&args).await,
             "update_project" => self.update_project(&args).await,
+            "update_document" => self.update_document(&args).await,
             "graphql_query" => self.run_graphql_document(&args, false).await,
             "graphql_mutation" => self.run_graphql_document(&args, true).await,
             _ => unreachable!(),
@@ -1250,6 +1472,63 @@ fn build_project_update_input(args: &Value) -> anyhow::Result<Value> {
     Ok(Value::Object(input))
 }
 
+fn build_document_create_input(args: &Value) -> anyhow::Result<Value> {
+    let title = trimmed(args.get("title").and_then(Value::as_str))
+        .ok_or_else(|| anyhow::anyhow!("create_document requires title"))?;
+    let project_id = trimmed(args.get("project_id").and_then(Value::as_str))
+        .ok_or_else(|| anyhow::anyhow!("create_document requires project_id"))?;
+
+    let mut input = Map::new();
+    input.insert("title".into(), json!(title));
+    input.insert("projectId".into(), json!(project_id));
+
+    if let Some(content) = trimmed(args.get("content").and_then(Value::as_str)) {
+        input.insert("content".into(), json!(content));
+    }
+    if let Some(icon) = trimmed(args.get("icon").and_then(Value::as_str)) {
+        input.insert("icon".into(), json!(icon));
+    }
+    if let Some(color) = trimmed(args.get("color").and_then(Value::as_str)) {
+        input.insert("color".into(), json!(color));
+    }
+    if let Some(sort_order) = args.get("sort_order").and_then(Value::as_f64) {
+        input.insert("sortOrder".into(), json!(sort_order));
+    }
+
+    Ok(Value::Object(input))
+}
+
+fn build_document_update_input(args: &Value) -> anyhow::Result<Value> {
+    let mut input = Map::new();
+
+    if let Some(title) = trimmed(args.get("title").and_then(Value::as_str)) {
+        input.insert("title".into(), json!(title));
+    }
+    if let Some(content) = trimmed(args.get("content").and_then(Value::as_str)) {
+        input.insert("content".into(), json!(content));
+    }
+    if let Some(icon) = trimmed(args.get("icon").and_then(Value::as_str)) {
+        input.insert("icon".into(), json!(icon));
+    }
+    if let Some(color) = trimmed(args.get("color").and_then(Value::as_str)) {
+        input.insert("color".into(), json!(color));
+    }
+    if let Some(project_id) = trimmed(args.get("project_id").and_then(Value::as_str)) {
+        input.insert("projectId".into(), json!(project_id));
+    }
+    if let Some(sort_order) = args.get("sort_order").and_then(Value::as_f64) {
+        input.insert("sortOrder".into(), json!(sort_order));
+    }
+
+    if input.is_empty() {
+        anyhow::bail!(
+            "update_document requires at least one mutable field (for example title, content, icon, color, project_id, or sort_order)"
+        );
+    }
+
+    Ok(Value::Object(input))
+}
+
 fn json_tool_result<T: Serialize>(value: &T) -> anyhow::Result<ToolResult> {
     Ok(ToolResult {
         success: true,
@@ -1337,8 +1616,18 @@ struct SearchProjectsData {
 }
 
 #[derive(Debug, Deserialize)]
+struct GetDocumentData {
+    document: Option<LinearDocument>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GetProjectData {
     project: Option<LinearProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListProjectDocumentsData {
+    project: Option<ProjectWithDocuments>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1386,6 +1675,18 @@ struct ProjectUpdateData {
     project_update: ProjectPayload,
 }
 
+#[derive(Debug, Deserialize)]
+struct DocumentCreateData {
+    #[serde(rename = "documentCreate")]
+    document_create: DocumentPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentUpdateData {
+    #[serde(rename = "documentUpdate")]
+    document_update: DocumentPayload,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct Connection<T> {
     #[serde(default)]
@@ -1418,6 +1719,12 @@ struct IssuePayload {
 struct ProjectPayload {
     success: bool,
     project: Option<LinearProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentPayload {
+    success: bool,
+    document: Option<LinearDocument>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -1533,6 +1840,36 @@ struct LinearProject {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+struct LinearDocument {
+    id: String,
+    title: String,
+    summary: Option<String>,
+    content: Option<String>,
+    icon: Option<String>,
+    color: Option<String>,
+    #[serde(rename = "slugId")]
+    slug_id: Option<String>,
+    #[serde(rename = "sortOrder")]
+    sort_order: Option<f64>,
+    url: Option<String>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+    #[serde(rename = "updatedAt")]
+    updated_at: Option<String>,
+    creator: Option<LinearUser>,
+    #[serde(rename = "updatedBy")]
+    updated_by: Option<LinearUser>,
+    project: Option<LinearProject>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProjectWithDocuments {
+    id: String,
+    name: String,
+    documents: Connection<LinearDocument>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct LinearUser {
     id: String,
     name: String,
@@ -1623,6 +1960,52 @@ mod tests {
     }
 
     #[test]
+    fn build_document_create_input_requires_title_and_project() {
+        let error = build_document_create_input(&json!({"title": "Missing project"})).unwrap_err();
+        assert!(error.to_string().contains("project_id"));
+    }
+
+    #[test]
+    fn build_document_create_input_maps_fields() {
+        let input = build_document_create_input(&json!({
+            "title": "Runbook",
+            "project_id": "project-1",
+            "content": "# Hello",
+            "icon": ":book:",
+            "color": "#112233",
+            "sort_order": 12.5
+        }))
+        .unwrap();
+
+        assert_eq!(input["title"], "Runbook");
+        assert_eq!(input["projectId"], "project-1");
+        assert_eq!(input["content"], "# Hello");
+        assert_eq!(input["icon"], ":book:");
+        assert_eq!(input["color"], "#112233");
+        assert_eq!(input["sortOrder"], 12.5);
+    }
+
+    #[test]
+    fn build_document_update_input_requires_changes() {
+        let error = build_document_update_input(&json!({})).unwrap_err();
+        assert!(error.to_string().contains("at least one mutable field"));
+    }
+
+    #[test]
+    fn build_document_update_input_maps_fields() {
+        let input = build_document_update_input(&json!({
+            "title": "Updated runbook",
+            "project_id": "project-2",
+            "sort_order": 4.0
+        }))
+        .unwrap();
+
+        assert_eq!(input["title"], "Updated runbook");
+        assert_eq!(input["projectId"], "project-2");
+        assert_eq!(input["sortOrder"], 4.0);
+    }
+
+    #[test]
     fn parameters_schema_lists_supported_actions() {
         let tool = LinearTool::new(
             "https://api.linear.app/graphql".into(),
@@ -1647,11 +2030,15 @@ mod tests {
         assert!(actions.contains(&"create_issue"));
         assert!(actions.contains(&"update_issue"));
         assert!(actions.contains(&"get_project"));
+        assert!(actions.contains(&"get_document"));
+        assert!(actions.contains(&"list_project_documents"));
         assert!(actions.contains(&"search_projects"));
         assert!(actions.contains(&"list_teams"));
         assert!(actions.contains(&"list_users"));
         assert!(actions.contains(&"list_workflow_states"));
+        assert!(actions.contains(&"create_document"));
         assert!(actions.contains(&"update_project"));
+        assert!(actions.contains(&"update_document"));
         assert!(actions.contains(&"graphql_query"));
         assert!(actions.contains(&"graphql_mutation"));
     }

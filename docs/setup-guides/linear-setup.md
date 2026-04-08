@@ -4,7 +4,7 @@ This guide covers Linear API access, write approvals, inbound webhooks, and scop
 
 ## 1. What this integration does
 
-- Exposes the `linear` tool for issue, project, team, user, and workflow state access.
+- Exposes the `linear` tool for issue, project, document, team, user, and workflow state access.
 - Gates mutating Linear actions behind the `linear.write` approval key.
 - Receives inbound Linear webhooks via `POST /linear`.
 - Verifies `Linear-Signature`, checks `webhookTimestamp`, and deduplicates by `Linear-Delivery`.
@@ -22,14 +22,18 @@ allowed_actions = [
   "search_issues",
   "list_comments",
   "get_project",
+  "get_document",
+  "list_project_documents",
   "search_projects",
   "list_teams",
   "list_users",
   "list_workflow_states",
   "create_comment",
   "create_issue",
+  "create_document",
   "update_issue",
   "update_project",
+  "update_document",
   "graphql_query",
   "graphql_mutation",
 ]
@@ -53,7 +57,7 @@ Notes:
 
 - `LINEAR_API_KEY` overrides `linear.api_key`.
 - `LINEAR_WEBHOOK_SECRET` overrides `linear.webhook_secret`.
-- `always_ask = ["linear.write"]` keeps all Linear writes approval-gated, including curated writes and raw `graphql_mutation`.
+- `always_ask = ["linear.write"]` keeps all Linear issue, project, comment, and document writes approval-gated, including raw `graphql_mutation`.
 - `webhook_automation_issue_prefixes = ["JB"]` limits background automation to issues like `JB-123`.
 
 ## 3. Gateway endpoint
