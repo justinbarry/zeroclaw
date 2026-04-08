@@ -10585,6 +10585,14 @@ impl Config {
             }
         }
 
+        // Linear API key: LINEAR_API_KEY
+        if let Ok(key) = std::env::var("LINEAR_API_KEY") {
+            let key = key.trim();
+            if !key.is_empty() {
+                self.linear.api_key = key.to_string();
+            }
+        }
+
         // Storage provider key (optional backend override): ZEROCLAW_STORAGE_PROVIDER
         if let Ok(provider) = std::env::var("ZEROCLAW_STORAGE_PROVIDER") {
             let provider = provider.trim();
@@ -16216,7 +16224,7 @@ require_otp_to_resume = true
         );
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_accepts_linear_webhook_with_secret() {
         let mut cfg = Config::default();
         cfg.linear.webhook_enabled = true;
@@ -16225,7 +16233,7 @@ require_otp_to_resume = true
         assert!(cfg.validate().is_ok());
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_rejects_linear_webhook_without_secret() {
         let mut cfg = Config::default();
         cfg.linear.webhook_enabled = true;
@@ -16235,7 +16243,7 @@ require_otp_to_resume = true
         assert!(err.contains("linear.webhook_secret must be set"));
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_accepts_linear_webhook_automation() {
         let mut cfg = Config::default();
         cfg.linear.webhook_enabled = true;
@@ -16247,7 +16255,7 @@ require_otp_to_resume = true
         assert!(cfg.validate().is_ok());
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_rejects_linear_webhook_automation_without_webhook() {
         let mut cfg = Config::default();
         cfg.linear.webhook_automation_enabled = true;
@@ -16257,7 +16265,7 @@ require_otp_to_resume = true
         assert!(err.contains("linear.webhook_automation_enabled requires"));
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_rejects_linear_webhook_automation_without_events() {
         let mut cfg = Config::default();
         cfg.linear.webhook_enabled = true;
@@ -16268,7 +16276,7 @@ require_otp_to_resume = true
         assert!(err.contains("linear.webhook_automation_events must include"));
     }
 
-    #[test]
+    #[tokio::test]
     async fn config_validate_rejects_linear_webhook_automation_with_empty_issue_prefix() {
         let mut cfg = Config::default();
         cfg.linear.webhook_enabled = true;

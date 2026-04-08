@@ -660,4 +660,25 @@ mod tests {
             "linear.write"
         );
     }
+
+    #[test]
+    fn approval_key_linear_missing_action_defaults_to_read() {
+        assert_eq!(approval_key("linear", &serde_json::json!({})), "linear");
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": null})),
+            "linear"
+        );
+    }
+
+    #[test]
+    fn approval_key_non_linear_tool_passes_through() {
+        assert_eq!(
+            approval_key("shell", &serde_json::json!({"command": "ls"})),
+            "shell"
+        );
+        assert_eq!(
+            approval_key("file_read", &serde_json::json!({"path": "/tmp/test"})),
+            "file_read"
+        );
+    }
 }

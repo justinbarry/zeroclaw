@@ -1661,6 +1661,7 @@ mod tests {
             pending_pairings: None,
             path_prefix: String::new(),
             canvas_store: crate::tools::canvas::CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }

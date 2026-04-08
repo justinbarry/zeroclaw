@@ -552,6 +552,8 @@ pub struct AppState {
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
     /// Shared canvas store for Live Canvas (A2UI) system
     pub canvas_store: CanvasStore,
+    /// Concurrency limit for webhook-triggered automation spawns.
+    pub webhook_automation_semaphore: Arc<tokio::sync::Semaphore>,
     /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
     #[cfg(feature = "webauthn")]
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
@@ -1039,6 +1041,7 @@ pub async fn run_gateway(
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         canvas_store,
+        webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(crate::security::SecretStore::new(
@@ -2292,7 +2295,7 @@ async fn handle_linear_webhook(
         tracing::error!("Linear webhook enabled but no signing secret is configured");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Linear webhook secret is not configured"})),
+            Json(serde_json::json!({"error": "Internal server error"})),
         );
     };
 
@@ -2436,7 +2439,15 @@ async fn handle_linear_webhook(
             "Linear webhook automation enqueued"
         );
 
+        let semaphore = state_for_task.webhook_automation_semaphore.clone();
         tokio::spawn(async move {
+            let _permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::error!("Webhook automation semaphore closed");
+                    return;
+                }
+            };
             match run_gateway_chat_with_tools(
                 &state_for_task,
                 &automation_message,
@@ -2789,6 +2800,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2860,6 +2872,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3255,6 +3268,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3334,6 +3348,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3425,6 +3440,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3488,6 +3504,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3556,6 +3573,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3615,6 +3633,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }
@@ -3924,6 +3943,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3994,6 +4014,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            webhook_automation_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };

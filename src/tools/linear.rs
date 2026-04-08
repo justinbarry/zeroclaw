@@ -10,6 +10,27 @@ const MAX_PAGE_SIZE: u64 = 50;
 const ISSUE_LOOKUP_LIMIT: u64 = 10;
 const MAX_ERROR_BODY_CHARS: usize = 500;
 
+const LINEAR_VALID_ACTIONS: &[&str] = &[
+    "get_issue",
+    "search_issues",
+    "list_comments",
+    "create_comment",
+    "create_issue",
+    "update_issue",
+    "get_project",
+    "get_document",
+    "list_project_documents",
+    "search_projects",
+    "list_teams",
+    "list_users",
+    "list_workflow_states",
+    "create_document",
+    "update_project",
+    "update_document",
+    "graphql_query",
+    "graphql_mutation",
+];
+
 const SEARCH_ISSUES_QUERY: &str = r#"
 query SearchIssues(
   $term: String!,
@@ -576,7 +597,14 @@ impl LinearTool {
 
         match data.search_issues.nodes.as_slice() {
             [] => anyhow::bail!("Linear issue not found for reference '{issue_ref}'"),
-            [single] => Ok(single.id.clone()),
+            [single] => {
+                tracing::warn!(
+                    "resolve_issue_id: no exact identifier match for '{}', falling back to fuzzy single match '{}'",
+                    issue_ref,
+                    single.identifier
+                );
+                Ok(single.id.clone())
+            }
             many => {
                 let candidates = many
                     .iter()
@@ -706,7 +734,11 @@ impl LinearTool {
             anyhow::bail!("Linear create_comment returned success=false");
         }
 
-        json_tool_result(&data.comment_create.comment)
+        let comment = data.comment_create.comment.ok_or_else(|| {
+            anyhow::anyhow!("Linear create_comment succeeded but returned no comment")
+        })?;
+
+        json_tool_result(&comment)
     }
 
     async fn create_issue(&self, args: &Value) -> anyhow::Result<ToolResult> {
@@ -995,32 +1027,13 @@ impl Tool for LinearTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        serde_json::from_str(
+        let mut schema: Value = serde_json::from_str(
             r#"{
               "type": "object",
               "properties": {
                 "action": {
                   "type": "string",
-                  "enum": [
-                    "get_issue",
-                    "search_issues",
-                    "list_comments",
-                    "create_comment",
-                    "create_issue",
-                    "update_issue",
-                    "get_project",
-                    "get_document",
-                    "list_project_documents",
-                    "search_projects",
-                    "list_teams",
-                    "list_users",
-                    "list_workflow_states",
-                    "create_document",
-                    "update_project",
-                    "update_document",
-                    "graphql_query",
-                    "graphql_mutation"
-                  ],
+                  "enum": [],
                   "description": "The Linear action to perform"
                 },
                 "issue_id": {
@@ -1184,7 +1197,14 @@ impl Tool for LinearTool {
               "required": ["action"]
             }"#,
         )
-        .expect("linear tool schema must be valid JSON")
+        .expect("linear tool schema must be valid JSON");
+        schema["properties"]["action"]["enum"] = Value::Array(
+            LINEAR_VALID_ACTIONS
+                .iter()
+                .map(|a| Value::String((*a).to_string()))
+                .collect(),
+        );
+        schema
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
@@ -1199,32 +1219,13 @@ impl Tool for LinearTool {
             }
         };
 
-        if !matches!(
-            action,
-            "get_issue"
-                | "search_issues"
-                | "list_comments"
-                | "create_comment"
-                | "create_issue"
-                | "update_issue"
-                | "get_project"
-                | "get_document"
-                | "list_project_documents"
-                | "search_projects"
-                | "list_teams"
-                | "list_users"
-                | "list_workflow_states"
-                | "create_document"
-                | "update_project"
-                | "update_document"
-                | "graphql_query"
-                | "graphql_mutation"
-        ) {
+        if !LINEAR_VALID_ACTIONS.contains(&action) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Unknown action: '{action}'. Valid actions: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, get_document, list_project_documents, search_projects, list_teams, list_users, list_workflow_states, create_document, update_project, update_document, graphql_query, graphql_mutation"
+                    "Unknown action: '{action}'. Valid actions: {}",
+                    LINEAR_VALID_ACTIONS.join(", ")
                 )),
             });
         }
@@ -1706,7 +1707,7 @@ struct PageInfo {
 #[derive(Debug, Deserialize)]
 struct CommentPayload {
     success: bool,
-    comment: LinearComment,
+    comment: Option<LinearComment>,
 }
 
 #[derive(Debug, Deserialize)]
