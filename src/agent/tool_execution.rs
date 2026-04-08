@@ -143,7 +143,10 @@ pub(crate) fn should_execute_tools_in_parallel(
     }
 
     if let Some(mgr) = approval {
-        if tool_calls.iter().any(|call| mgr.needs_approval(&call.name)) {
+        if tool_calls.iter().any(|call| {
+            let approval_name = crate::approval::approval_key(&call.name, &call.arguments);
+            mgr.needs_approval(&approval_name)
+        }) {
             // Approval-gated calls must keep sequential handling so the caller can
             // enforce CLI prompt/deny policy consistently.
             return false;

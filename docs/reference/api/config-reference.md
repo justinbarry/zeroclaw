@@ -508,6 +508,48 @@ Notes:
 - Validation rejects duplicate `(service, resource)` pairs and duplicate methods within a single entry.
 - See `docs/superpowers/specs/2026-03-19-google-workspace-operation-allowlist.md` for the full policy model and verified workflow examples.
 
+## `[linear]`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | Enable the `linear` tool |
+| `api_url` | `https://api.linear.app/graphql` | Linear GraphQL endpoint |
+| `api_key` | unset | Linear personal API key |
+| `allowed_actions` | read-only set | Allowed Linear tool actions |
+| `timeout_secs` | `30` | Per-request timeout |
+| `webhook_enabled` | `false` | Enable passive webhook ingestion on `POST /linear` |
+| `webhook_secret` | unset | Linear webhook signing secret |
+| `webhook_automation_enabled` | `false` | Enable background agent execution for matching webhooks |
+| `webhook_automation_events` | `[]` | Event filters such as `Issue` or `Issue:create` |
+| `webhook_automation_issue_prefixes` | `[]` | Optional issue-prefix scope such as `JB` |
+
+Supported tool actions:
+
+- Read helpers: `get_issue`, `search_issues`, `list_comments`, `get_project`, `search_projects`, `list_teams`, `list_users`, `list_workflow_states`, `graphql_query`
+- Write helpers: `create_comment`, `create_issue`, `update_issue`, `update_project`, `graphql_mutation`
+
+Notes:
+
+- `LINEAR_API_KEY` overrides `api_key` when set.
+- `LINEAR_WEBHOOK_SECRET` overrides `webhook_secret` when set.
+- `graphql_query` is read-only and rejects mutation documents.
+- `graphql_mutation` is treated as a write operation and follows the same approval path as curated writes.
+- `webhook_automation_enabled = true` requires both `webhook_enabled = true` and at least one value in `webhook_automation_events`.
+- When `webhook_automation_issue_prefixes` is non-empty, automation only runs for matching issue identifiers such as `JB-123`.
+
+Recommended production setup:
+
+```toml
+[linear]
+enabled = true
+webhook_enabled = true
+webhook_automation_enabled = true
+webhook_automation_events = ["Issue:create", "Issue:update", "Comment"]
+webhook_automation_issue_prefixes = ["JB"]
+```
+
+See [linear-setup.md](../../setup-guides/linear-setup.md) for the end-to-end setup and rollout checklist.
+
 ## `[gateway]`
 
 | Key | Default | Purpose |
@@ -547,12 +589,14 @@ Notes:
 - `allowed_commands` entries can be command names (for example, `"git"`), explicit executable paths (for example, `"/usr/bin/antigravity"`), or `"*"` to allow any command name/path (risk gates still apply).
 - Shell separator/operator parsing is quote-aware. Characters like `;` inside quoted arguments are treated as literals, not command separators.
 - Unquoted shell chaining/operators are still enforced by policy checks (`;`, `|`, `&&`, `||`, background chaining, and redirects).
+- A recommended production pattern for Linear is `always_ask = ["linear.write"]` so all issue/project/comment mutations require approval.
 
 ```toml
 [autonomy]
 workspace_only = false
 forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
 allowed_roots = ["~/Desktop/projects", "/opt/shared-repo"]
+always_ask = ["linear.write"]
 ```
 
 ## `[memory]`

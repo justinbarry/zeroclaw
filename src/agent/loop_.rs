@@ -3004,9 +3004,10 @@ pub(crate) async fn run_tool_call_loop(
 
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
-                if mgr.needs_approval(&tool_name) {
+                let approval_name = crate::approval::approval_key(&tool_name, &tool_args);
+                if mgr.needs_approval(&approval_name) {
                     let request = ApprovalRequest {
-                        tool_name: tool_name.clone(),
+                        tool_name: approval_name.clone(),
                         arguments: tool_args.clone(),
                     };
 
@@ -3019,7 +3020,7 @@ pub(crate) async fn run_tool_call_loop(
                         mgr.prompt_cli(&request)
                     };
 
-                    mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
+                    mgr.record_decision(&approval_name, &tool_args, decision, channel_name);
 
                     if decision == ApprovalResponse::No {
                         let denied = "Denied by user.".to_string();

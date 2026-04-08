@@ -12,6 +12,21 @@ host = "[::]"
 allow_public_bind = true
 require_pairing = false
 
+# Linear integration
+# Use env vars in production when possible:
+#   export LINEAR_API_KEY='lin_api_...'
+#   export LINEAR_WEBHOOK_SECRET='whsec_...'
+#
+# [linear]
+# enabled = true
+# webhook_enabled = true
+# webhook_automation_enabled = true
+# webhook_automation_events = ["Issue:create", "Issue:update", "Comment"]
+# webhook_automation_issue_prefixes = ["JB"]
+#
+# [autonomy]
+# always_ask = ["linear.write"]
+
 # Cost tracking and budget enforcement configuration
 # Enable to track API usage costs and enforce spending limits
 [cost]

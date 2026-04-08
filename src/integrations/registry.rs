@@ -531,7 +531,25 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             name: "Notion",
             description: "Workspace & databases",
             category: IntegrationCategory::Productivity,
-            status_fn: |_| IntegrationStatus::ComingSoon,
+            status_fn: |c| {
+                if c.notion.enabled {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
+        },
+        IntegrationEntry {
+            name: "Linear",
+            description: "Issues, comments, and workflow tracking",
+            category: IntegrationCategory::Productivity,
+            status_fn: |c| {
+                if c.linear.enabled {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
         },
         IntegrationEntry {
             name: "Apple Notes",
@@ -566,12 +584,6 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
         IntegrationEntry {
             name: "Trello",
             description: "Kanban boards",
-            category: IntegrationCategory::Productivity,
-            status_fn: |_| IntegrationStatus::ComingSoon,
-        },
-        IntegrationEntry {
-            name: "Linear",
-            description: "Issue tracking",
             category: IntegrationCategory::Productivity,
             status_fn: |_| IntegrationStatus::ComingSoon,
         },

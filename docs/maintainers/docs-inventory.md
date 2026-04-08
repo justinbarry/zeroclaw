@@ -48,6 +48,7 @@ Last reviewed: **February 18, 2026**.
 | `docs/commands-reference.md` | Current Reference | users/operators |
 | `docs/providers-reference.md` | Current Reference | users/operators |
 | `docs/channels-reference.md` | Current Reference | users/operators |
+| `docs/setup-guides/linear-setup.md` | Current Integration Guide | operators |
 | `docs/nextcloud-talk-setup.md` | Current Guide | operators |
 | `docs/config-reference.md` | Current Reference | operators |
 | `docs/custom-providers.md` | Current Integration Guide | integration developers |

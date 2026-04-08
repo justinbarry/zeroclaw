@@ -8,6 +8,7 @@ use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 
@@ -193,6 +194,25 @@ impl ApprovalManager {
     /// auto-deny in the tool-call loop before reaching this point.
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
+    }
+}
+
+/// Derive the approval key for a tool call.
+///
+/// Most tools use their plain tool name. Some mixed-surface tools expose both
+/// read and write actions behind one public name; those can map mutating
+/// actions onto a distinct approval key so reads stay prompt-free while writes
+/// still require explicit approval.
+pub fn approval_key(tool_name: &str, args: &Value) -> String {
+    match tool_name {
+        "linear" => match args.get("action").and_then(Value::as_str) {
+            Some(
+                "create_comment" | "create_issue" | "update_issue" | "update_project"
+                | "graphql_mutation",
+            ) => "linear.write".to_string(),
+            _ => tool_name.to_string(),
+        },
+        _ => tool_name.to_string(),
     }
 }
 
@@ -606,6 +626,30 @@ mod tests {
         assert!(
             mgr.needs_approval("weather"),
             "always_ask must override auto_approve"
+        );
+    }
+
+    #[test]
+    fn approval_key_separates_linear_writes_from_reads() {
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "search_issues"})),
+            "linear"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "create_comment"})),
+            "linear.write"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "create_issue"})),
+            "linear.write"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "update_project"})),
+            "linear.write"
+        );
+        assert_eq!(
+            approval_key("linear", &serde_json::json!({"action": "graphql_mutation"})),
+            "linear.write"
         );
     }
 }

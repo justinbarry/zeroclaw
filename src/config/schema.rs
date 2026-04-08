@@ -38,6 +38,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "tool.browser",
     "tool.composio",
     "tool.http_request",
+    "tool.linear",
     "tool.pushover",
     "tool.web_search",
     "memory.embeddings",
@@ -369,6 +370,10 @@ pub struct Config {
     /// Jira integration configuration (`[jira]`).
     #[serde(default)]
     pub jira: JiraConfig,
+
+    /// Linear integration configuration (`[linear]`).
+    #[serde(default)]
+    pub linear: LinearConfig,
 
     /// Secure inter-node transport configuration (`[node_transport]`).
     #[serde(default)]
@@ -8118,6 +8123,106 @@ impl Default for JiraConfig {
     }
 }
 
+/// Linear integration configuration (`[linear]`).
+///
+/// When `enabled = true`, registers the `linear` tool which can query issues
+/// and projects, search issues and projects, list comments/teams/users/workflow
+/// states, add comments, create issues, update issues, update projects, and run
+/// raw GraphQL queries or mutations.
+/// Requires `api_key` (or the `LINEAR_API_KEY` env var).
+///
+/// ## Defaults
+/// - `enabled`: `false`
+/// - `api_url`: `"https://api.linear.app/graphql"`
+/// - `allowed_actions`: `["get_issue", "search_issues", "list_comments", "get_project", "search_projects", "list_teams", "list_users", "list_workflow_states", "graphql_query"]`
+/// - `timeout_secs`: `30`
+/// - `webhook_enabled`: `false`
+/// - `webhook_automation_enabled`: `false`
+///
+/// ## Auth
+/// Linear personal API keys are sent in the `Authorization` header without a
+/// `Bearer` prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LinearConfig {
+    /// Enable the `linear` tool. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Linear GraphQL endpoint. Default: `https://api.linear.app/graphql`.
+    #[serde(default = "default_linear_api_url")]
+    pub api_url: String,
+    /// Linear personal API key. Encrypted at rest. Falls back to `LINEAR_API_KEY`.
+    #[serde(default)]
+    pub api_key: String,
+    /// Actions the agent is permitted to call.
+    /// Valid values: `"get_issue"`, `"search_issues"`, `"list_comments"`,
+    /// `"create_comment"`, `"create_issue"`, `"update_issue"`,
+    /// `"get_project"`, `"search_projects"`, `"list_teams"`, `"list_users"`,
+    /// `"list_workflow_states"`, `"update_project"`, `"graphql_query"`,
+    /// `"graphql_mutation"`.
+    #[serde(default = "default_linear_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    /// Request timeout in seconds. Default: `30`.
+    #[serde(default = "default_linear_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Enable passive Linear webhook ingestion on the gateway `/linear` route.
+    #[serde(default)]
+    pub webhook_enabled: bool,
+    /// Linear webhook signing secret. Encrypted at rest. Falls back to
+    /// `LINEAR_WEBHOOK_SECRET`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Enable background agent execution for matching Linear webhook events.
+    #[serde(default)]
+    pub webhook_automation_enabled: bool,
+    /// Linear event filters to trigger automation, for example `"Issue"` or
+    /// `"Issue:create"`.
+    #[serde(default)]
+    pub webhook_automation_events: Vec<String>,
+    /// Optional issue identifier prefixes to scope automation, for example
+    /// `"JB"` or `"JB-"` to match `JB-123`.
+    #[serde(default)]
+    pub webhook_automation_issue_prefixes: Vec<String>,
+}
+
+fn default_linear_api_url() -> String {
+    "https://api.linear.app/graphql".to_string()
+}
+
+fn default_linear_allowed_actions() -> Vec<String> {
+    vec![
+        "get_issue".to_string(),
+        "search_issues".to_string(),
+        "list_comments".to_string(),
+        "get_project".to_string(),
+        "search_projects".to_string(),
+        "list_teams".to_string(),
+        "list_users".to_string(),
+        "list_workflow_states".to_string(),
+        "graphql_query".to_string(),
+    ]
+}
+
+fn default_linear_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: default_linear_api_url(),
+            api_key: String::new(),
+            allowed_actions: default_linear_allowed_actions(),
+            timeout_secs: default_linear_timeout_secs(),
+            webhook_enabled: false,
+            webhook_secret: None,
+            webhook_automation_enabled: false,
+            webhook_automation_events: Vec::new(),
+            webhook_automation_issue_prefixes: Vec::new(),
+        }
+    }
+}
+
 ///
 /// Controls the read-only cloud transformation analysis tools:
 /// IaC review, migration assessment, cost analysis, and architecture review.
@@ -8435,6 +8540,7 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            linear: LinearConfig::default(),
             node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
@@ -9375,6 +9481,16 @@ impl Config {
                 decrypt_secret(&store, &mut config.jira.api_token, "config.jira.api_token")?;
             }
 
+            // Linear API key
+            if !config.linear.api_key.is_empty() {
+                decrypt_secret(&store, &mut config.linear.api_key, "config.linear.api_key")?;
+            }
+            decrypt_optional_secret(
+                &store,
+                &mut config.linear.webhook_secret,
+                "config.linear.webhook_secret",
+            )?;
+
             config.apply_env_overrides();
             config.validate()?;
             tracing::info!(
@@ -10035,6 +10151,97 @@ impl Config {
                         action
                     );
                 }
+            }
+        }
+
+        // Linear
+        if self.linear.enabled {
+            if self.linear.api_url.trim().is_empty() {
+                anyhow::bail!("linear.api_url must not be empty when linear.enabled = true");
+            }
+            let parsed = reqwest::Url::parse(self.linear.api_url.trim())
+                .context("linear.api_url must be a valid URL")?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                anyhow::bail!("linear.api_url must use http/https");
+            }
+            if self.linear.timeout_secs == 0 {
+                anyhow::bail!("linear.timeout_secs must be greater than 0");
+            }
+            if self.linear.api_key.trim().is_empty()
+                && std::env::var("LINEAR_API_KEY")
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            {
+                anyhow::bail!(
+                    "linear.api_key must be set (or LINEAR_API_KEY env var) when linear.enabled = true"
+                );
+            }
+            let valid_actions = [
+                "get_issue",
+                "search_issues",
+                "list_comments",
+                "create_comment",
+                "create_issue",
+                "update_issue",
+                "get_project",
+                "search_projects",
+                "list_teams",
+                "list_users",
+                "list_workflow_states",
+                "update_project",
+                "graphql_query",
+                "graphql_mutation",
+            ];
+            for action in &self.linear.allowed_actions {
+                if !valid_actions.contains(&action.as_str()) {
+                    anyhow::bail!(
+                        "linear.allowed_actions contains unknown action: '{}'. \
+                         Valid: get_issue, search_issues, list_comments, create_comment, create_issue, update_issue, get_project, search_projects, list_teams, list_users, list_workflow_states, update_project, graphql_query, graphql_mutation",
+                        action
+                    );
+                }
+            }
+        }
+        if self.linear.webhook_enabled
+            && self
+                .linear
+                .webhook_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .is_none()
+            && std::env::var("LINEAR_WEBHOOK_SECRET")
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            anyhow::bail!(
+                "linear.webhook_secret must be set (or LINEAR_WEBHOOK_SECRET env var) when linear.webhook_enabled = true"
+            );
+        }
+        if self.linear.webhook_automation_enabled && !self.linear.webhook_enabled {
+            anyhow::bail!(
+                "linear.webhook_automation_enabled requires linear.webhook_enabled = true"
+            );
+        }
+        if self.linear.webhook_automation_enabled
+            && self.linear.webhook_automation_events.is_empty()
+        {
+            anyhow::bail!(
+                "linear.webhook_automation_events must include at least one event filter when linear.webhook_automation_enabled = true"
+            );
+        }
+        for event in &self.linear.webhook_automation_events {
+            if event.trim().is_empty() {
+                anyhow::bail!("linear.webhook_automation_events must not contain empty values");
+            }
+        }
+        for prefix in &self.linear.webhook_automation_issue_prefixes {
+            if prefix.trim().is_empty() {
+                anyhow::bail!(
+                    "linear.webhook_automation_issue_prefixes must not contain empty values"
+                );
             }
         }
 
@@ -10857,6 +11064,20 @@ impl Config {
             )?;
         }
 
+        // Linear API key
+        if !config_to_save.linear.api_key.is_empty() {
+            encrypt_secret(
+                &store,
+                &mut config_to_save.linear.api_key,
+                "config.linear.api_key",
+            )?;
+        }
+        encrypt_optional_secret(
+            &store,
+            &mut config_to_save.linear.webhook_secret,
+            "config.linear.webhook_secret",
+        )?;
+
         let toml_str =
             toml::to_string_pretty(&config_to_save).context("Failed to serialize config")?;
 
@@ -11611,6 +11832,7 @@ auto_save = true
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            linear: LinearConfig::default(),
             node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
@@ -12141,6 +12363,7 @@ default_temperature = 0.7
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
             jira: JiraConfig::default(),
+            linear: LinearConfig::default(),
             node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             linkedin: LinkedInConfig::default(),
@@ -15983,6 +16206,71 @@ require_otp_to_resume = true
             err.contains("not in the effective allowed_services"),
             "expected effective-allowed_services error, got: {err}"
         );
+    }
+
+    #[test]
+    async fn config_validate_accepts_linear_webhook_with_secret() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    async fn config_validate_rejects_linear_webhook_without_secret() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = None;
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("linear.webhook_secret must be set"));
+    }
+
+    #[test]
+    async fn config_validate_accepts_linear_webhook_automation() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+        cfg.linear.webhook_automation_enabled = true;
+        cfg.linear.webhook_automation_events = vec!["Issue:create".into(), "Comment".into()];
+        cfg.linear.webhook_automation_issue_prefixes = vec!["JB".into()];
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    async fn config_validate_rejects_linear_webhook_automation_without_webhook() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_automation_enabled = true;
+        cfg.linear.webhook_automation_events = vec!["Issue".into()];
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("linear.webhook_automation_enabled requires"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_linear_webhook_automation_without_events() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+        cfg.linear.webhook_automation_enabled = true;
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("linear.webhook_automation_events must include"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_linear_webhook_automation_with_empty_issue_prefix() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+        cfg.linear.webhook_automation_enabled = true;
+        cfg.linear.webhook_automation_events = vec!["Issue:create".into()];
+        cfg.linear.webhook_automation_issue_prefixes = vec![" ".into()];
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("linear.webhook_automation_issue_prefixes"));
     }
 
     // ── Bootstrap files ─────────────────────────────────────

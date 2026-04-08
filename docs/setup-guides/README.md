@@ -9,6 +9,7 @@ For first-time setup and quick orientation.
 3. Update or uninstall on macOS: [macos-update-uninstall.md](macos-update-uninstall.md)
 4. Find commands by tasks: [../reference/cli/commands-reference.md](../reference/cli/commands-reference.md)
 5. Register MCP servers: [mcp-setup.md](mcp-setup.md)
+6. Set up Linear API + webhook automation: [linear-setup.md](linear-setup.md)
 
 ## Choose Your Path
 
@@ -33,3 +34,4 @@ For first-time setup and quick orientation.
 - Runtime operations: [../ops/README.md](../ops/README.md)
 - Reference catalogs: [../reference/README.md](../reference/README.md)
 - macOS lifecycle tasks: [macos-update-uninstall.md](macos-update-uninstall.md)
+- Linear integration setup: [linear-setup.md](linear-setup.md)

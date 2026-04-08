@@ -50,7 +50,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -99,6 +99,13 @@ fn nextcloud_talk_memory_key(msg: &crate::channels::traits::ChannelMessage) -> S
     format!("nextcloud_talk_{}_{}", msg.sender, msg.id)
 }
 
+fn linear_webhook_memory_key(delivery_id: Option<&str>) -> String {
+    match delivery_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(delivery_id) => format!("linear_webhook_{delivery_id}"),
+        None => format!("linear_webhook_{}", Uuid::new_v4()),
+    }
+}
+
 fn sender_session_id(channel: &str, msg: &crate::channels::traits::ChannelMessage) -> String {
     match &msg.thread_ts {
         Some(thread_id) => format!("{channel}_{thread_id}_{}", msg.sender),
@@ -120,6 +127,179 @@ fn hash_webhook_secret(value: &str) -> String {
 
     let digest = Sha256::digest(value.as_bytes());
     hex::encode(digest)
+}
+
+fn current_unix_timestamp_millis() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+fn linear_webhook_enabled(config: &Config) -> bool {
+    config.linear.webhook_enabled
+}
+
+fn linear_webhook_automation_enabled(config: &Config) -> bool {
+    config.linear.webhook_automation_enabled
+}
+
+fn normalize_linear_issue_prefix(prefix: &str) -> Option<String> {
+    let prefix = prefix.trim().trim_end_matches('-').trim();
+    (!prefix.is_empty()).then(|| format!("{}-", prefix.to_ascii_uppercase()))
+}
+
+fn resolve_linear_webhook_secret(config: &Config) -> Option<String> {
+    std::env::var("LINEAR_WEBHOOK_SECRET")
+        .ok()
+        .and_then(|secret| {
+            let secret = secret.trim();
+            (!secret.is_empty()).then(|| secret.to_owned())
+        })
+        .or_else(|| {
+            config
+                .linear
+                .webhook_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn linear_webhook_timestamp_is_fresh(webhook_timestamp: i64) -> bool {
+    (current_unix_timestamp_millis() - webhook_timestamp).abs() <= 60_000
+}
+
+fn linear_webhook_automation_matches(
+    filters: &[String],
+    issue_prefixes: &[String],
+    linear_event: Option<&str>,
+    payload: &LinearWebhookPayload,
+) -> bool {
+    if filters.is_empty() {
+        return false;
+    }
+
+    let action = payload
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let event_candidates = [
+        linear_event
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        payload
+            .event_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ];
+
+    let event_match = filters.iter().map(|value| value.trim()).any(|filter| {
+        if filter.is_empty() {
+            return false;
+        }
+
+        event_candidates.iter().flatten().any(|event| {
+            filter.eq_ignore_ascii_case(event)
+                || action
+                    .is_some_and(|action| filter.eq_ignore_ascii_case(&format!("{event}:{action}")))
+        })
+    });
+
+    if !event_match {
+        return false;
+    }
+
+    if issue_prefixes.is_empty() {
+        return true;
+    }
+
+    let Some(identifier) = linear_webhook_issue_identifier(payload) else {
+        return false;
+    };
+    let identifier = identifier.to_ascii_uppercase();
+    issue_prefixes
+        .iter()
+        .filter_map(|prefix| normalize_linear_issue_prefix(prefix))
+        .any(|prefix| identifier.starts_with(&prefix))
+}
+
+fn linear_webhook_issue_identifier(payload: &LinearWebhookPayload) -> Option<String> {
+    if let Some(identifier) = payload
+        .data
+        .get("identifier")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(identifier.to_string());
+    }
+
+    let url = payload.url.as_deref()?.trim();
+    let marker = "/issue/";
+    let start = url.find(marker)? + marker.len();
+    let remainder = &url[start..];
+    let identifier = remainder
+        .split(['/', '#', '?'])
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(identifier.to_string())
+}
+
+fn build_linear_webhook_automation_message(
+    delivery_id: Option<&str>,
+    linear_event: Option<&str>,
+    payload: &LinearWebhookPayload,
+) -> String {
+    let normalized = serde_json::json!({
+        "source": "linear",
+        "delivery_id": delivery_id,
+        "event": linear_event,
+        "action": payload.action,
+        "type": payload.event_type,
+        "created_at": payload.created_at,
+        "organization_id": payload.organization_id,
+        "webhook_id": payload.webhook_id,
+        "url": payload.url,
+        "webhook_timestamp": payload.webhook_timestamp,
+        "updated_from": payload.updated_from,
+        "data": payload.data,
+    });
+
+    format!(
+        "A verified Linear webhook event matched the configured automation filters.\n\
+         Analyze the event and take any configured follow-up actions using available tools.\n\
+         If no action is warranted, summarize that briefly.\n\n{}",
+        serde_json::to_string_pretty(&normalized)
+            .unwrap_or_else(|_| "{\"source\":\"linear\"}".to_string())
+    )
+}
+
+pub fn verify_linear_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let signature = signature_header.trim();
+    if signature.is_empty() {
+        return false;
+    }
+
+    let Ok(signature_bytes) = hex::decode(signature) else {
+        return false;
+    };
+
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&signature_bytes).is_ok()
 }
 
 /// How often the rate limiter sweeps stale IP entries from its map.
@@ -777,6 +957,9 @@ pub async fn run_gateway(
     if nextcloud_talk_channel.is_some() {
         println!("  POST {pfx}/nextcloud-talk — Nextcloud Talk bot webhook");
     }
+    if config.linear.webhook_enabled {
+        println!("  POST {pfx}/linear    — Linear webhook (signed event ingestion)");
+    }
     println!("  GET  {pfx}/api/*     — REST API (bearer token required)");
     println!("  GET  {pfx}/ws/chat   — WebSocket agent chat");
     if config.nodes.enabled {
@@ -905,6 +1088,7 @@ pub async fn run_gateway(
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
+        .route("/linear", post(handle_linear_webhook))
         .route("/webhook/gmail", post(handle_gmail_push_webhook))
         // ── Claude Code runner hooks ──
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
@@ -2048,6 +2232,262 @@ async fn handle_nextcloud_talk_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct LinearWebhookPayload {
+    action: Option<String>,
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+    #[serde(rename = "organizationId")]
+    organization_id: Option<String>,
+    #[serde(rename = "webhookTimestamp")]
+    webhook_timestamp: i64,
+    #[serde(rename = "webhookId")]
+    webhook_id: Option<String>,
+    url: Option<String>,
+    #[serde(default)]
+    data: serde_json::Value,
+    #[serde(rename = "updatedFrom")]
+    updated_from: Option<serde_json::Value>,
+}
+
+/// POST /linear — incoming Linear webhook (passive ingestion only)
+async fn handle_linear_webhook(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let rate_key =
+        client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+    if !state.rate_limiter.allow_webhook(&rate_key) {
+        tracing::warn!("/linear rate limit exceeded");
+        let err = serde_json::json!({
+            "error": "Too many webhook requests. Please retry later.",
+            "retry_after": RATE_LIMIT_WINDOW_SECS,
+        });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(err));
+    }
+
+    let (enabled, webhook_secret, automation_enabled, automation_events, automation_issue_prefixes) = {
+        let config = state.config.lock();
+        (
+            linear_webhook_enabled(&config),
+            resolve_linear_webhook_secret(&config),
+            linear_webhook_automation_enabled(&config),
+            config.linear.webhook_automation_events.clone(),
+            config.linear.webhook_automation_issue_prefixes.clone(),
+        )
+    };
+
+    if !enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Linear webhook not configured"})),
+        );
+    }
+
+    let Some(webhook_secret) = webhook_secret else {
+        tracing::error!("Linear webhook enabled but no signing secret is configured");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Linear webhook secret is not configured"})),
+        );
+    };
+
+    let signature = headers
+        .get("Linear-Signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_linear_signature(&webhook_secret, &body, signature) {
+        tracing::warn!(
+            "Linear webhook signature verification failed (signature: {})",
+            if signature.is_empty() {
+                "missing"
+            } else {
+                "invalid"
+            }
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid signature"})),
+        );
+    }
+
+    let Ok(payload) = serde_json::from_slice::<LinearWebhookPayload>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    if !linear_webhook_timestamp_is_fresh(payload.webhook_timestamp) {
+        tracing::warn!(
+            "Linear webhook rejected due to stale timestamp: {}",
+            payload.webhook_timestamp
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid webhook timestamp"})),
+        );
+    }
+
+    let delivery_id = headers
+        .get("Linear-Delivery")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let linear_event = headers
+        .get("Linear-Event")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    let idempotency_key = delivery_id
+        .as_deref()
+        .or(payload.webhook_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(idempotency_key) = idempotency_key {
+        if !state.idempotency_store.record_if_new(idempotency_key) {
+            tracing::info!("Linear webhook duplicate ignored: {idempotency_key}");
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "duplicate",
+                    "idempotent": true,
+                    "message": "Webhook delivery already processed"
+                })),
+            );
+        }
+    }
+
+    tracing::info!(
+        delivery_id = delivery_id.as_deref().unwrap_or(""),
+        linear_event = linear_event.as_deref().unwrap_or(""),
+        action = payload.action.as_deref().unwrap_or(""),
+        entity_type = payload.event_type.as_deref().unwrap_or(""),
+        "Linear webhook received"
+    );
+
+    if state.auto_save {
+        let key = linear_webhook_memory_key(idempotency_key);
+        let normalized = serde_json::json!({
+            "source": "linear",
+            "delivery_id": delivery_id,
+            "event": linear_event,
+            "action": payload.action,
+            "type": payload.event_type,
+            "created_at": payload.created_at,
+            "organization_id": payload.organization_id,
+            "webhook_id": payload.webhook_id,
+            "url": payload.url,
+            "webhook_timestamp": payload.webhook_timestamp,
+            "updated_from": payload.updated_from,
+            "data": payload.data,
+        });
+        if let Ok(content) = serde_json::to_string_pretty(&normalized) {
+            let _ = state
+                .mem
+                .store(
+                    &key,
+                    &content,
+                    MemoryCategory::Custom("linear_webhook".to_string()),
+                    None,
+                )
+                .await;
+        }
+    }
+
+    if automation_enabled
+        && linear_webhook_automation_matches(
+            &automation_events,
+            &automation_issue_prefixes,
+            linear_event.as_deref(),
+            &payload,
+        )
+    {
+        let state_for_task = state.clone();
+        let delivery_id_for_task = delivery_id.clone();
+        let linear_event_for_task = linear_event.clone();
+        let automation_message = build_linear_webhook_automation_message(
+            delivery_id_for_task.as_deref(),
+            linear_event_for_task.as_deref(),
+            &payload,
+        );
+        let automation_id = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let automation_session_id = format!("linear_webhook_auto_{automation_id}");
+        let automation_result_key = format!("linear_webhook_automation_result_{automation_id}");
+        let action_for_task = payload.action.clone();
+        let event_type_for_task = payload.event_type.clone();
+        let url_for_task = payload.url.clone();
+
+        tracing::info!(
+            delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+            linear_event = linear_event_for_task.as_deref().unwrap_or(""),
+            action = action_for_task.as_deref().unwrap_or(""),
+            entity_type = event_type_for_task.as_deref().unwrap_or(""),
+            "Linear webhook automation enqueued"
+        );
+
+        tokio::spawn(async move {
+            match run_gateway_chat_with_tools(
+                &state_for_task,
+                &automation_message,
+                Some(&automation_session_id),
+            )
+            .await
+            {
+                Ok(response) => {
+                    tracing::info!(
+                        delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+                        session_id = %automation_session_id,
+                        "Linear webhook automation completed"
+                    );
+                    if state_for_task.auto_save && !memory::should_skip_autosave_content(&response)
+                    {
+                        let content = serde_json::json!({
+                            "source": "linear",
+                            "delivery_id": delivery_id_for_task,
+                            "event": linear_event_for_task,
+                            "action": action_for_task,
+                            "type": event_type_for_task,
+                            "url": url_for_task,
+                            "response": response,
+                        });
+                        if let Ok(serialized) = serde_json::to_string_pretty(&content) {
+                            let _ = state_for_task
+                                .mem
+                                .store(
+                                    &automation_result_key,
+                                    &serialized,
+                                    MemoryCategory::Custom("linear_webhook_automation".to_string()),
+                                    Some(&automation_session_id),
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(
+                        delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+                        session_id = %automation_session_id,
+                        "Linear webhook automation failed: {error:#}"
+                    );
+                }
+            }
+        });
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
 /// Maximum request body size for the Gmail webhook endpoint (1 MB).
 /// Google Pub/Sub messages are typically under 10 KB.
 const GMAIL_WEBHOOK_MAX_BODY: usize = 1024 * 1024;
@@ -3136,6 +3576,301 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn linear_webhook_test_state(config: Config, memory: Arc<dyn Memory>) -> AppState {
+        AppState {
+            config: Arc::new(Mutex::new(config)),
+            provider: Arc::new(MockProvider::default()),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: memory,
+            auto_save: true,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            gmail_push: None,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+            event_buffer: Arc::new(sse::EventBuffer::new(16)),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
+            node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            path_prefix: String::new(),
+            session_backend: None,
+            session_queue: std::sync::Arc::new(
+                crate::gateway::session_queue::SessionActorQueue::new(8, 30, 600),
+            ),
+            device_registry: None,
+            pending_pairings: None,
+            canvas_store: CanvasStore::new(),
+            #[cfg(feature = "webauthn")]
+            webauthn: None,
+        }
+    }
+
+    fn compute_linear_signature_hex(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn linear_webhook_payload(timestamp_ms: i64) -> String {
+        serde_json::json!({
+            "action": "create",
+            "type": "Issue",
+            "createdAt": "2026-04-07T12:00:00.000Z",
+            "organizationId": "org-123",
+            "webhookTimestamp": timestamp_ms,
+            "webhookId": "webhook-123",
+            "url": "https://linear.app/burnt/issue/JB-1/test",
+            "data": {
+                "id": "issue-123",
+                "identifier": "JB-1",
+                "title": "Passive webhook smoke test"
+            }
+        })
+        .to_string()
+    }
+
+    fn linear_webhook_payload_struct(timestamp_ms: i64) -> LinearWebhookPayload {
+        serde_json::from_str(&linear_webhook_payload(timestamp_ms)).unwrap()
+    }
+
+    #[test]
+    fn linear_signature_valid() {
+        let secret = generate_test_secret();
+        let body = br#"{"action":"create","webhookTimestamp":1}"#;
+        let signature = compute_linear_signature_hex(&secret, body);
+
+        assert!(verify_linear_signature(&secret, body, &signature));
+    }
+
+    #[test]
+    fn linear_signature_invalid_wrong_secret() {
+        let secret = generate_test_secret();
+        let wrong_secret = generate_test_secret();
+        let body = br#"{"action":"create","webhookTimestamp":1}"#;
+        let signature = compute_linear_signature_hex(&wrong_secret, body);
+
+        assert!(!verify_linear_signature(&secret, body, &signature));
+    }
+
+    #[test]
+    fn linear_webhook_automation_match_supports_event_and_event_action() {
+        let payload = linear_webhook_payload_struct(current_unix_timestamp_millis());
+
+        assert!(linear_webhook_automation_matches(
+            &["Issue".into()],
+            &[],
+            Some("Issue"),
+            &payload
+        ));
+        assert!(linear_webhook_automation_matches(
+            &["Issue:create".into()],
+            &[],
+            Some("Issue"),
+            &payload
+        ));
+        assert!(!linear_webhook_automation_matches(
+            &["Project".into()],
+            &[],
+            Some("Issue"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn linear_webhook_issue_identifier_reads_data_or_url() {
+        let payload = linear_webhook_payload_struct(current_unix_timestamp_millis());
+        assert_eq!(
+            linear_webhook_issue_identifier(&payload).as_deref(),
+            Some("JB-1")
+        );
+
+        let mut payload_without_identifier = payload;
+        payload_without_identifier.data = serde_json::json!({
+            "id": "issue-123",
+            "title": "Passive webhook smoke test"
+        });
+        assert_eq!(
+            linear_webhook_issue_identifier(&payload_without_identifier).as_deref(),
+            Some("JB-1")
+        );
+    }
+
+    #[test]
+    fn linear_webhook_automation_match_supports_issue_prefix_filters() {
+        let payload = linear_webhook_payload_struct(current_unix_timestamp_millis());
+
+        assert!(linear_webhook_automation_matches(
+            &["Issue:create".into()],
+            &["JB".into()],
+            Some("Issue"),
+            &payload
+        ));
+        assert!(linear_webhook_automation_matches(
+            &["Issue:create".into()],
+            &["JB-".into()],
+            Some("Issue"),
+            &payload
+        ));
+        assert!(!linear_webhook_automation_matches(
+            &["Issue:create".into()],
+            &["SEC".into()],
+            Some("Issue"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn linear_webhook_automation_message_includes_payload_details() {
+        let payload = linear_webhook_payload_struct(current_unix_timestamp_millis());
+        let message =
+            build_linear_webhook_automation_message(Some("delivery-123"), Some("Issue"), &payload);
+
+        assert!(message.contains("verified Linear webhook event"));
+        assert!(message.contains("\"delivery_id\": \"delivery-123\""));
+        assert!(message.contains("\"type\": \"Issue\""));
+        assert!(message.contains("\"identifier\": \"JB-1\""));
+    }
+
+    #[tokio::test]
+    async fn linear_webhook_returns_not_found_when_not_configured() {
+        let state = linear_webhook_test_state(Config::default(), Arc::new(MockMemory));
+
+        let response = handle_linear_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{}"#),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn linear_webhook_rejects_invalid_signature() {
+        let secret = generate_test_secret();
+        let mut config = Config::default();
+        config.linear.webhook_enabled = true;
+        config.linear.webhook_secret = Some(secret.clone());
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let payload = linear_webhook_payload(current_unix_timestamp_millis());
+        let mut headers = HeaderMap::new();
+        headers.insert("Linear-Signature", HeaderValue::from_static("deadbeef"));
+
+        let response = handle_linear_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(payload),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn linear_webhook_rejects_stale_timestamp() {
+        let secret = generate_test_secret();
+        let mut config = Config::default();
+        config.linear.webhook_enabled = true;
+        config.linear.webhook_secret = Some(secret.clone());
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let payload = linear_webhook_payload(current_unix_timestamp_millis() - 120_000);
+        let signature = compute_linear_signature_hex(&secret, payload.as_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Linear-Signature",
+            HeaderValue::from_str(&signature).unwrap(),
+        );
+
+        let response = handle_linear_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(payload),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn linear_webhook_autosaves_and_deduplicates_by_delivery_id() {
+        let secret = generate_test_secret();
+        let mut config = Config::default();
+        config.linear.webhook_enabled = true;
+        config.linear.webhook_secret = Some(secret.clone());
+
+        let tracking_impl = Arc::new(TrackingMemory::default());
+        let memory: Arc<dyn Memory> = tracking_impl.clone();
+        let state = linear_webhook_test_state(config, memory);
+
+        let payload = linear_webhook_payload(current_unix_timestamp_millis());
+        let signature = compute_linear_signature_hex(&secret, payload.as_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Linear-Signature",
+            HeaderValue::from_str(&signature).unwrap(),
+        );
+        headers.insert(
+            "Linear-Delivery",
+            HeaderValue::from_static("234d1a4e-b617-4388-90fe-adc3633d6b72"),
+        );
+        headers.insert("Linear-Event", HeaderValue::from_static("Issue"));
+
+        let first = handle_linear_webhook(
+            State(state.clone()),
+            test_connect_info(),
+            headers.clone(),
+            Bytes::from(payload.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = handle_linear_webhook(
+            State(state),
+            test_connect_info(),
+            headers,
+            Bytes::from(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let keys = tracking_impl.keys.lock().clone();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0],
+            "linear_webhook_234d1a4e-b617-4388-90fe-adc3633d6b72"
+        );
+
+        let payload = second.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(parsed["status"], "duplicate");
     }
 
     fn compute_nextcloud_signature_hex(secret: &str, random: &str, body: &str) -> String {

@@ -80,6 +80,7 @@ Last refreshed: **February 18, 2026**.
 - [macos-update-uninstall.md](setup-guides/macos-update-uninstall.md)
 - [one-click-bootstrap.md](setup-guides/one-click-bootstrap.md)
 - [mcp-setup.md](setup-guides/mcp-setup.md)
+- [linear-setup.md](setup-guides/linear-setup.md)
 
 ### 2) Command/Config References & Integrations
 
@@ -87,6 +88,7 @@ Last refreshed: **February 18, 2026**.
 - [commands-reference.md](reference/cli/commands-reference.md)
 - [providers-reference.md](reference/api/providers-reference.md)
 - [channels-reference.md](reference/api/channels-reference.md)
+- [linear-setup.md](setup-guides/linear-setup.md)
 - [nextcloud-talk-setup.md](setup-guides/nextcloud-talk-setup.md)
 - [config-reference.md](reference/api/config-reference.md)
 - [custom-providers.md](contributing/custom-providers.md)
