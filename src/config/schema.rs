@@ -8631,7 +8631,8 @@ impl Default for JiraConfig {
 /// ## Auth
 /// Linear personal API keys are sent in the `Authorization` header without a
 /// `Bearer` prefix.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Configurable)]
+#[prefix = "linear"]
 pub struct LinearConfig {
     /// Enable the `linear` tool. Default: `false`.
     #[serde(default)]
@@ -8641,6 +8642,7 @@ pub struct LinearConfig {
     pub api_url: String,
     /// Linear personal API key. Encrypted at rest. Falls back to `LINEAR_API_KEY`.
     #[serde(default)]
+    #[secret]
     pub api_key: String,
     /// Actions the agent is permitted to call.
     /// Valid values: `"get_issue"`, `"search_issues"`, `"list_comments"`,
@@ -8660,6 +8662,7 @@ pub struct LinearConfig {
     /// Linear webhook signing secret. Encrypted at rest. Falls back to
     /// `LINEAR_WEBHOOK_SECRET`.
     #[serde(default)]
+    #[secret]
     pub webhook_secret: Option<String>,
     /// Enable background agent execution for matching Linear webhook events.
     #[serde(default)]
@@ -8732,7 +8735,8 @@ impl Default for LinearConfig {
 /// - `db_path`: `"~/.zeroclaw/bluedot-meetings.db"`
 /// - `retention_days`: `365`
 /// - `max_meetings`: `500`
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Configurable)]
+#[prefix = "bluedot"]
 pub struct BluedotConfig {
     /// Enable the `bluedot_meeting` tool. Default: `false`.
     #[serde(default)]
@@ -8743,6 +8747,7 @@ pub struct BluedotConfig {
     /// Bluedot Svix signing secret. Encrypted at rest. Falls back to
     /// `BLUEDOT_WEBHOOK_SECRET`.
     #[serde(default)]
+    #[secret]
     pub webhook_secret: Option<String>,
     /// Allowed `bluedot_meeting` tool actions.
     /// Valid values: `"recent"`, `"get"`, `"search"`, `"transcript"`.
@@ -9685,21 +9690,6 @@ impl Config {
             let store = crate::security::SecretStore::new(&zeroclaw_dir, config.secrets.encrypt);
             // Decrypt all #[secret]-annotated fields via Configurable derive
             config.decrypt_secrets(&store)?;
-
-            // Linear API key
-            if !config.linear.api_key.is_empty() {
-                decrypt_secret(&store, &mut config.linear.api_key, "config.linear.api_key")?;
-            }
-            decrypt_optional_secret(
-                &store,
-                &mut config.linear.webhook_secret,
-                "config.linear.webhook_secret",
-            )?;
-            decrypt_optional_secret(
-                &store,
-                &mut config.bluedot.webhook_secret,
-                "config.bluedot.webhook_secret",
-            )?;
 
             config.apply_env_overrides();
             config.validate()?;
@@ -10981,25 +10971,6 @@ impl Config {
         // Encrypt all #[secret]-annotated fields via Configurable derive
         config_to_save.encrypt_secrets(&store)?;
 
-        // Linear API key
-        if !config_to_save.linear.api_key.is_empty() {
-            encrypt_secret(
-                &store,
-                &mut config_to_save.linear.api_key,
-                "config.linear.api_key",
-            )?;
-        }
-        encrypt_optional_secret(
-            &store,
-            &mut config_to_save.linear.webhook_secret,
-            "config.linear.webhook_secret",
-        )?;
-        encrypt_optional_secret(
-            &store,
-            &mut config_to_save.bluedot.webhook_secret,
-            "config.bluedot.webhook_secret",
-        )?;
-
         let toml_str =
             toml::to_string_pretty(&config_to_save).context("Failed to serialize config")?;
 
@@ -11225,6 +11196,8 @@ impl_enum_prop_kind!(
     OtpMethod,
     SandboxBackend,
     AutonomyLevel,
+    LinearConfig,
+    BluedotConfig,
 );
 
 #[cfg(test)]
