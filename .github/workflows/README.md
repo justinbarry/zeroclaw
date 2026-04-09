@@ -10,7 +10,8 @@ Subdirectories are not valid locations for workflow entry files.
 Repository convention:
 
 1. Keep runnable workflow entry files at `.github/workflows/` root.
-2. Keep cross-tooling/local CI scripts under `dev/` or `scripts/ci/` when used outside Actions.
+2. This repository currently keeps a single runnable workflow: `ci-run.yml`.
+3. Keep cross-tooling/local CI scripts under `dev/` or `scripts/ci/` when used outside Actions.
 
 Workflow behavior documentation in this directory:
 
