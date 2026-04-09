@@ -185,20 +185,28 @@ impl Tool for GoogleWorkspaceTool {
 
     /// Execute a Google Workspace CLI command with input validation and security enforcement.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let service = args
+        let service_raw = args
             .get("service")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'service' parameter"))?;
-        let resource = args
+        let resource_raw = args
             .get("resource")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'resource' parameter"))?;
-        let method = args
+        let method_raw = args
             .get("method")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'method' parameter"))?;
+        // Normalise to lowercase so callers using camelCase (e.g. "calendarList") work correctly.
+        let service_lc = service_raw.to_lowercase();
+        let resource_lc = resource_raw.to_lowercase();
+        let method_lc = method_raw.to_lowercase();
+        let service = service_lc.as_str();
+        let resource = resource_lc.as_str();
+        let method = method_lc.as_str();
 
         // Extract and validate sub_resource early so the allowlist check can account for it.
+        let sub_resource_lc_storage: String;
         let sub_resource: Option<&str> = if let Some(sub_resource_value) = args.get("sub_resource")
         {
             let s = match sub_resource_value.as_str() {
@@ -211,6 +219,8 @@ impl Tool for GoogleWorkspaceTool {
                     });
                 }
             };
+            sub_resource_lc_storage = s.to_lowercase();
+            let s = sub_resource_lc_storage.as_str();
             if !s
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
