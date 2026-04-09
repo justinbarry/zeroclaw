@@ -21,6 +21,8 @@ enabled = true
 webhook_enabled = true
 webhook_automation_enabled = true
 webhook_automation_agent = "project_manager"
+webhook_automation_title_keywords = ["Sprint", "Roadmap"]
+webhook_automation_attendee_emails = ["pm@company.com"]
 allowed_actions = ["recent", "get", "search", "transcript"]
 db_path = "~/.zeroclaw/bluedot-meetings.db"
 retention_days = 365
@@ -39,8 +41,9 @@ Notes:
 - The SQLite store is separate from the standard memory backend.
 - `webhook_automation_enabled = true` runs the agent only after transcript-ready Bluedot events.
 - `webhook_automation_agent = "project_manager"` runs that named agent profile instead of the primary gateway agent.
+- `webhook_automation_title_keywords` and `webhook_automation_attendee_emails` let you scope the PM workflow to specific meeting titles and participants.
 - If `[agents.project_manager]` omits `provider` and `model`, it inherits the root `default_provider` and `default_model`, which is the right setup when the main agent already runs on Codex.
-- The automation prompt tells the agent to inspect the meeting via `bluedot_meeting` and look for related Linear issues or projects.
+- The automation prompt tells the agent to inspect the meeting via `bluedot_meeting`, look for related Linear issues or projects, and return a short PM-style assessment with explicit write recommendations.
 - For the Linear lookup to work, enable the `linear` tool and allow read actions such as `search_issues` and `search_projects`.
 
 ## 3. Gateway endpoint

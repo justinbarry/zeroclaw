@@ -428,10 +428,12 @@ pub struct Config {
 
     /// Linear integration configuration (`[linear]`).
     #[serde(default)]
+    #[nested]
     pub linear: LinearConfig,
 
     /// Bluedot meeting transcript integration configuration (`[bluedot]`).
     #[serde(default)]
+    #[nested]
     pub bluedot: BluedotConfig,
 
     /// Secure inter-node transport configuration (`[node_transport]`).
@@ -8742,6 +8744,8 @@ impl Default for LinearConfig {
 /// - `webhook_enabled`: `false`
 /// - `webhook_automation_enabled`: `false`
 /// - `webhook_automation_agent`: unset
+/// - `webhook_automation_title_keywords`: `[]`
+/// - `webhook_automation_attendee_emails`: `[]`
 /// - `allowed_actions`: `["recent", "get", "search", "transcript"]`
 /// - `db_path`: `"~/.zeroclaw/bluedot-meetings.db"`
 /// - `retention_days`: `365`
@@ -8767,6 +8771,14 @@ pub struct BluedotConfig {
     /// When unset, the primary gateway agent handles automation.
     #[serde(default)]
     pub webhook_automation_agent: Option<String>,
+    /// Optional case-insensitive title keywords required for Bluedot webhook
+    /// automation. When non-empty, the meeting title must contain at least one.
+    #[serde(default)]
+    pub webhook_automation_title_keywords: Vec<String>,
+    /// Optional attendee emails required for Bluedot webhook automation.
+    /// When non-empty, at least one normalized attendee must match.
+    #[serde(default)]
+    pub webhook_automation_attendee_emails: Vec<String>,
     /// Allowed `bluedot_meeting` tool actions.
     /// Valid values: `"recent"`, `"get"`, `"search"`, `"transcript"`.
     #[serde(default = "default_bluedot_allowed_actions")]
@@ -8811,6 +8823,8 @@ impl Default for BluedotConfig {
             webhook_secret: None,
             webhook_automation_enabled: false,
             webhook_automation_agent: None,
+            webhook_automation_title_keywords: Vec::new(),
+            webhook_automation_attendee_emails: Vec::new(),
             allowed_actions: default_bluedot_allowed_actions(),
             db_path: default_bluedot_db_path(),
             retention_days: default_bluedot_retention_days(),
@@ -10599,6 +10613,20 @@ impl Config {
                 anyhow::bail!(
                     "bluedot.webhook_automation_agent refers to unknown agent '{}'",
                     agent_name
+                );
+            }
+        }
+        for keyword in &self.bluedot.webhook_automation_title_keywords {
+            if keyword.trim().is_empty() {
+                anyhow::bail!(
+                    "bluedot.webhook_automation_title_keywords must not contain empty values"
+                );
+            }
+        }
+        for attendee in &self.bluedot.webhook_automation_attendee_emails {
+            if attendee.trim().is_empty() {
+                anyhow::bail!(
+                    "bluedot.webhook_automation_attendee_emails must not contain empty values"
                 );
             }
         }
@@ -16444,6 +16472,30 @@ require_otp_to_resume = true
 
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("bluedot.webhook_automation_enabled requires"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_webhook_automation_with_empty_title_keyword() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+        cfg.bluedot.webhook_automation_enabled = true;
+        cfg.bluedot.webhook_automation_title_keywords = vec![" ".into()];
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.webhook_automation_title_keywords"));
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_webhook_automation_with_empty_attendee_email() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+        cfg.bluedot.webhook_automation_enabled = true;
+        cfg.bluedot.webhook_automation_attendee_emails = vec![" ".into()];
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.webhook_automation_attendee_emails"));
     }
 
     #[test]

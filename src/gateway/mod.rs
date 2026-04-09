@@ -236,6 +236,16 @@ fn bluedot_webhook_automation_enabled(config: &Config) -> bool {
     config.bluedot.webhook_automation_enabled
 }
 
+fn normalize_automation_keyword(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_ascii_lowercase())
+}
+
+fn normalize_automation_email(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_ascii_lowercase())
+}
+
 fn normalize_webhook_automation_agent(agent_name: Option<&str>) -> Option<String> {
     agent_name
         .map(str::trim)
@@ -330,6 +340,45 @@ fn linear_webhook_automation_matches(
         .any(|prefix| identifier.starts_with(&prefix))
 }
 
+fn bluedot_webhook_automation_matches(
+    title_keywords: &[String],
+    attendee_emails: &[String],
+    meeting: &crate::bluedot::MeetingRecord,
+) -> bool {
+    let normalized_keywords: Vec<String> = title_keywords
+        .iter()
+        .filter_map(|value| normalize_automation_keyword(value))
+        .collect();
+    let normalized_attendees: Vec<String> = attendee_emails
+        .iter()
+        .filter_map(|value| normalize_automation_email(value))
+        .collect();
+
+    if !normalized_keywords.is_empty() {
+        let title = meeting.title.trim().to_ascii_lowercase();
+        if !normalized_keywords
+            .iter()
+            .any(|keyword| title.contains(keyword))
+        {
+            return false;
+        }
+    }
+
+    if normalized_attendees.is_empty() {
+        return true;
+    }
+
+    let meeting_attendees: Vec<String> = meeting
+        .attendees
+        .iter()
+        .filter_map(|value| normalize_automation_email(value))
+        .collect();
+
+    normalized_attendees
+        .iter()
+        .any(|attendee| meeting_attendees.iter().any(|value| value == attendee))
+}
+
 fn linear_webhook_issue_identifier(payload: &LinearWebhookPayload) -> Option<String> {
     if let Some(identifier) = payload
         .data
@@ -406,7 +455,9 @@ fn build_bluedot_webhook_automation_message(
          Use the bluedot_meeting tool to inspect the meeting for video_id `{}`.\n\
          Look for related Linear issues or projects using the available Linear tools.\n\
          Prefer read-only Linear lookups such as search_issues, get_issue, search_projects, and get_project.\n\
-         Summarize the most likely related issues or projects, or say that nothing relevant was found.\n\
+         Respond with five short sections titled exactly: Likely Project, Related Issues, Risks/Blockers, Suggested Follow-up, Write Recommendation.\n\
+         In Write Recommendation, state whether a Linear comment, document update, issue update, or no write is warranted.\n\
+         If nothing relevant is found, say that explicitly in Likely Project and Related Issues.\n\
          Do not create or modify Linear data unless a later step explicitly asks for it and approval allows it.\n\n{}",
         meeting.video_id,
         serde_json::to_string_pretty(&normalized)
@@ -2470,6 +2521,8 @@ async fn handle_bluedot_webhook(
         webhook_secret,
         automation_enabled,
         automation_agent,
+        automation_title_keywords,
+        automation_attendee_emails,
         db_path,
         retention_days,
         max_meetings,
@@ -2480,6 +2533,8 @@ async fn handle_bluedot_webhook(
             resolve_bluedot_webhook_secret(&config),
             bluedot_webhook_automation_enabled(&config),
             normalize_webhook_automation_agent(config.bluedot.webhook_automation_agent.as_deref()),
+            config.bluedot.webhook_automation_title_keywords.clone(),
+            config.bluedot.webhook_automation_attendee_emails.clone(),
             config.bluedot.db_path.clone(),
             config.bluedot.retention_days,
             config.bluedot.max_meetings,
@@ -2612,7 +2667,13 @@ async fn handle_bluedot_webhook(
                 }
             }
 
-            let automation_enqueued = automation_enabled && payload.is_transcript_ready_event();
+            let automation_enqueued = automation_enabled
+                && payload.is_transcript_ready_event()
+                && bluedot_webhook_automation_matches(
+                    &automation_title_keywords,
+                    &automation_attendee_emails,
+                    &meeting,
+                );
             if automation_enqueued {
                 let state_for_task = state.clone();
                 let payload_for_task = payload.clone();
@@ -4391,7 +4452,49 @@ mod tests {
         assert!(message.contains("verified Bluedot transcript webhook"));
         assert!(message.contains("bluedot_meeting tool"));
         assert!(message.contains("Linear issues or projects"));
+        assert!(message.contains("Likely Project"));
+        assert!(message.contains("Write Recommendation"));
         assert!(message.contains("video-123"));
+    }
+
+    #[test]
+    fn bluedot_webhook_automation_match_supports_title_and_attendee_filters() {
+        let meeting = crate::bluedot::MeetingRecord {
+            video_id: "video-123".into(),
+            meeting_id: Some("meeting-123".into()),
+            title: "Sprint Planning With Burnt".into(),
+            created_at: current_unix_timestamp_millis() / 1000,
+            duration_secs: Some(1800.0),
+            attendees: vec!["pm@burnt.com".into(), "eng@burnt.com".into()],
+            summary: Some("Planning".into()),
+            transcript: vec![],
+        };
+
+        assert!(bluedot_webhook_automation_matches(
+            &["sprint".into()],
+            &[],
+            &meeting
+        ));
+        assert!(bluedot_webhook_automation_matches(
+            &[],
+            &["PM@BURNT.COM".into()],
+            &meeting
+        ));
+        assert!(bluedot_webhook_automation_matches(
+            &["burnt".into()],
+            &["eng@burnt.com".into()],
+            &meeting
+        ));
+        assert!(!bluedot_webhook_automation_matches(
+            &["customer".into()],
+            &[],
+            &meeting
+        ));
+        assert!(!bluedot_webhook_automation_matches(
+            &[],
+            &["sales@burnt.com".into()],
+            &meeting
+        ));
     }
 
     #[tokio::test]
@@ -4771,6 +4874,60 @@ mod tests {
         let transcript_json: serde_json::Value =
             serde_json::from_slice(&transcript_payload).unwrap();
         assert_eq!(transcript_json["automation_enqueued"], true);
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_automation_respects_title_filters() {
+        let secret = generate_svix_secret();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.bluedot.webhook_enabled = true;
+        config.bluedot.webhook_secret = Some(secret.clone());
+        config.bluedot.webhook_automation_enabled = true;
+        config.bluedot.webhook_automation_title_keywords = vec!["customer".into()];
+        config.bluedot.db_path = tmp.path().join("bluedot.db").to_string_lossy().to_string();
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let transcript_body = bluedot_transcript_payload();
+        let transcript_timestamp = current_unix_timestamp_millis() / 1000;
+        let transcript_signature = compute_bluedot_signature(
+            &secret,
+            "msg-transcript-filtered",
+            transcript_timestamp,
+            &transcript_body,
+        );
+        let mut transcript_headers = HeaderMap::new();
+        transcript_headers.insert(
+            "svix-id",
+            HeaderValue::from_static("msg-transcript-filtered"),
+        );
+        transcript_headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&transcript_timestamp.to_string()).unwrap(),
+        );
+        transcript_headers.insert(
+            "svix-signature",
+            HeaderValue::from_str(&transcript_signature).unwrap(),
+        );
+
+        let transcript_response = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            transcript_headers,
+            Bytes::from(transcript_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(transcript_response.status(), StatusCode::OK);
+        let transcript_payload = transcript_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let transcript_json: serde_json::Value =
+            serde_json::from_slice(&transcript_payload).unwrap();
+        assert_eq!(transcript_json["automation_enqueued"], false);
     }
 
     fn compute_nextcloud_signature_hex(secret: &str, random: &str, body: &str) -> String {

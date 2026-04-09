@@ -572,6 +572,8 @@ See [linear-setup.md](../../setup-guides/linear-setup.md) for the end-to-end set
 | `webhook_secret` | unset | Svix signing secret for Bluedot webhooks |
 | `webhook_automation_enabled` | `false` | Run the agent after transcript-ready webhooks to inspect the meeting and look for related Linear items |
 | `webhook_automation_agent` | unset | Optional named agent profile to run for Bluedot webhook automation |
+| `webhook_automation_title_keywords` | `[]` | Optional case-insensitive title keywords required for automation |
+| `webhook_automation_attendee_emails` | `[]` | Optional attendee-email filters required for automation |
 | `allowed_actions` | full read set | Allowed `bluedot_meeting` actions |
 | `db_path` | `~/.zeroclaw/bluedot-meetings.db` | SQLite database path for stored meetings |
 | `retention_days` | `365` | Prune meetings older than this many days |
@@ -591,7 +593,9 @@ Notes:
 - `search` matches against title, summary, transcript text, and attendee text.
 - `webhook_automation_enabled = true` requires `webhook_enabled = true`.
 - Automation only triggers for transcript-created Bluedot events, not summary-only events.
-- The automation prompt tells the agent to inspect the stored meeting and search Linear issues/projects with the available tools.
+- When `webhook_automation_title_keywords` is non-empty, the meeting title must contain at least one keyword.
+- When `webhook_automation_attendee_emails` is non-empty, at least one normalized attendee must match.
+- The automation prompt tells the agent to inspect the stored meeting and search Linear issues/projects with the available tools, then return a PM-style assessment with explicit write recommendations.
 - When `webhook_automation_agent` is set, transcript-ready automation runs that named agent profile instead of the primary gateway agent.
 
 Recommended setup:
@@ -602,6 +606,8 @@ enabled = true
 webhook_enabled = true
 webhook_automation_enabled = true
 webhook_automation_agent = "project_manager"
+webhook_automation_title_keywords = ["Sprint", "Roadmap"]
+webhook_automation_attendee_emails = ["pm@company.com"]
 allowed_actions = ["recent", "get", "search", "transcript"]
 db_path = "~/.zeroclaw/bluedot-meetings.db"
 retention_days = 365
