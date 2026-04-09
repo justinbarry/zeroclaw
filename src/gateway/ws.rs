@@ -28,7 +28,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, info, warn};
+use std::time::Duration;
 
 /// Optional connection parameters sent as the first WebSocket message.
 ///
@@ -355,6 +356,12 @@ async fn handle_socket(
                     continue;
                 }
 
+                info!(
+                    session = %session_key,
+                    content_len = content.len(),
+                    "[ws/chat] Message received"
+                );
+
                 // Acquire session lock to serialize concurrent turns
                 let _session_guard = match state.session_queue.acquire(&session_key).await {
                     Ok(guard) => guard,
@@ -421,6 +428,14 @@ async fn process_chat_message(
         let _ = backend.set_session_state(session_key, "running", Some(&turn_id));
     }
 
+    info!(
+        session = %session_key,
+        content_len = content.len(),
+        provider = %provider_label,
+        model = %state.model,
+        "[ws/chat] Starting agent turn"
+    );
+
     // Channel for streaming turn events from the agent.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
 
@@ -429,8 +444,12 @@ async fn process_chat_message(
     // `agent` into a spawned task (it is `&mut`), so we use a join
     // instead — `turn_streamed` writes to the channel and we drain it
     // from the other branch.
+    //
+    // Wrap in a 5-minute timeout so a hung provider doesn't block
+    // the websocket indefinitely.
     let content_owned = content.to_string();
     let turn_fut = async { agent.turn_streamed(&content_owned, event_tx).await };
+    let turn_fut = tokio::time::timeout(Duration::from_secs(300), turn_fut);
 
     // Drive both futures concurrently: the agent turn produces events
     // and we relay them over WebSocket.
@@ -454,10 +473,36 @@ async fn process_chat_message(
         }
     };
 
-    let (result, ()) = tokio::join!(turn_fut, forward_fut);
+    let (turn_result, ()) = tokio::join!(turn_fut, forward_fut);
+
+    // Unwrap the timeout layer
+    let result = match turn_result {
+        Ok(inner) => inner,
+        Err(_) => {
+            warn!(
+                session = %session_key,
+                "[ws/chat] Agent turn timed out after 300s"
+            );
+            let err = serde_json::json!({
+                "type": "error",
+                "message": "Agent turn timed out (300s). Please try again.",
+                "code": "TIMEOUT",
+            });
+            let _ = sender.send(Message::Text(err.to_string().into())).await;
+            if let Some(ref backend) = state.session_backend {
+                let _ = backend.set_session_state(session_key, "error", Some(&turn_id));
+            }
+            return;
+        }
+    };
 
     match result {
         Ok(response) => {
+            info!(
+                session = %session_key,
+                response_len = response.len(),
+                "[ws/chat] Agent turn completed"
+            );
             // Persist assistant response
             if let Some(ref backend) = state.session_backend {
                 let assistant_msg = crate::providers::ChatMessage::assistant(&response);
