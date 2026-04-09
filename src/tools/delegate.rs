@@ -2235,6 +2235,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_and_model_deserialization_default_to_empty_for_inheritance() {
+        let toml_str = r#"
+            system_prompt = "inherit defaults"
+        "#;
+        let config: DelegateAgentConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.provider.is_empty());
+        assert!(config.model.is_empty());
+    }
+
+    #[test]
     fn timeout_deserialization_with_custom_values() {
         let toml_str = r#"
             provider = "ollama"

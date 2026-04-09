@@ -9,6 +9,7 @@ This guide covers Bluedot webhook ingest and the `bluedot_meeting` tool for stor
 - Verifies Svix signatures before storing meeting data.
 - Merges summary and transcript events into one meeting record keyed by `videoId`.
 - Stores meeting data in a dedicated SQLite database instead of generic memory autosave.
+- Can optionally auto-run the agent after transcript-ready events to look for related Linear issues and projects.
 
 ## 2. Recommended configuration
 
@@ -18,6 +19,8 @@ Add this to `~/.zeroclaw/config.toml`:
 [bluedot]
 enabled = true
 webhook_enabled = true
+webhook_automation_enabled = true
+webhook_automation_agent = "project_manager"
 allowed_actions = ["recent", "get", "search", "transcript"]
 db_path = "~/.zeroclaw/bluedot-meetings.db"
 retention_days = 365
@@ -34,7 +37,11 @@ Notes:
 
 - `BLUEDOT_WEBHOOK_SECRET` overrides `bluedot.webhook_secret`.
 - The SQLite store is separate from the standard memory backend.
-- V1 is passive ingest plus query tooling only. It does not auto-run the agent on new meetings.
+- `webhook_automation_enabled = true` runs the agent only after transcript-ready Bluedot events.
+- `webhook_automation_agent = "project_manager"` runs that named agent profile instead of the primary gateway agent.
+- If `[agents.project_manager]` omits `provider` and `model`, it inherits the root `default_provider` and `default_model`, which is the right setup when the main agent already runs on Codex.
+- The automation prompt tells the agent to inspect the meeting via `bluedot_meeting` and look for related Linear issues or projects.
+- For the Linear lookup to work, enable the `linear` tool and allow read actions such as `search_issues` and `search_projects`.
 
 ## 3. Gateway endpoint
 

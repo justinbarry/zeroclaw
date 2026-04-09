@@ -21,6 +21,7 @@ require_pairing = false
 # enabled = true
 # webhook_enabled = true
 # webhook_automation_enabled = true
+# webhook_automation_agent = "project_manager"
 # webhook_automation_events = ["Issue:create", "Issue:update", "Comment"]
 # webhook_automation_issue_prefixes = ["JB"]
 #
@@ -34,10 +35,21 @@ require_pairing = false
 # [bluedot]
 # enabled = true
 # webhook_enabled = true
+# webhook_automation_enabled = true
+# webhook_automation_agent = "project_manager"
 # allowed_actions = ["recent", "get", "search", "transcript"]
 # db_path = "~/.zeroclaw/bluedot-meetings.db"
 # retention_days = 365
 # max_meetings = 500
+
+# [agents.project_manager]
+# provider/model are optional here and inherit default_provider/default_model
+# system_prompt = "You are a project manager. Map meetings to existing Linear work, identify blockers, summarize status, and avoid mutations unless approval is granted."
+# agentic = true
+# allowed_tools = ["bluedot_meeting", "linear", "memory_store", "memory_recall"]
+# max_iterations = 8
+# agentic_timeout_secs = 600
+# memory_namespace = "project_manager"
 
 # Cost tracking and budget enforcement configuration
 # Enable to track API usage costs and enforce spending limits

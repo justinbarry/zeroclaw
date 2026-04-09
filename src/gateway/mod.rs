@@ -36,7 +36,7 @@ use crate::security::SecurityPolicy;
 use crate::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
 use crate::tools;
 use crate::tools::canvas::CanvasStore;
-use crate::tools::traits::ToolSpec;
+use crate::tools::traits::{Tool, ToolSpec};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
@@ -225,6 +225,24 @@ fn linear_webhook_enabled(config: &Config) -> bool {
     config.linear.webhook_enabled
 }
 
+fn bluedot_webhook_memory_key(delivery_id: Option<&str>) -> String {
+    match delivery_id.filter(|value| !value.trim().is_empty()) {
+        Some(delivery_id) => format!("bluedot_webhook_{delivery_id}"),
+        None => format!("bluedot_webhook_{}", Uuid::new_v4()),
+    }
+}
+
+fn bluedot_webhook_automation_enabled(config: &Config) -> bool {
+    config.bluedot.webhook_automation_enabled
+}
+
+fn normalize_webhook_automation_agent(agent_name: Option<&str>) -> Option<String> {
+    agent_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn linear_webhook_automation_enabled(config: &Config) -> bool {
     config.linear.webhook_automation_enabled
 }
@@ -361,6 +379,38 @@ fn build_linear_webhook_automation_message(
          If no action is warranted, summarize that briefly.\n\n{}",
         serde_json::to_string_pretty(&normalized)
             .unwrap_or_else(|_| "{\"source\":\"linear\"}".to_string())
+    )
+}
+
+fn build_bluedot_webhook_automation_message(
+    delivery_id: Option<&str>,
+    payload: &BluedotWebhookPayload,
+    meeting: &crate::bluedot::MeetingRecord,
+) -> String {
+    let normalized = serde_json::json!({
+        "source": "bluedot",
+        "delivery_id": delivery_id,
+        "event": payload.event_type,
+        "video_id": meeting.video_id,
+        "meeting_id": meeting.meeting_id,
+        "title": meeting.title,
+        "created_at": meeting.created_at,
+        "duration_secs": meeting.duration_secs,
+        "attendees": meeting.attendees,
+        "summary_present": meeting.summary.as_ref().is_some_and(|value| !value.trim().is_empty()),
+        "transcript_entries": meeting.transcript.len(),
+    });
+
+    format!(
+        "A verified Bluedot transcript webhook was received.\n\
+         Use the bluedot_meeting tool to inspect the meeting for video_id `{}`.\n\
+         Look for related Linear issues or projects using the available Linear tools.\n\
+         Prefer read-only Linear lookups such as search_issues, get_issue, search_projects, and get_project.\n\
+         Summarize the most likely related issues or projects, or say that nothing relevant was found.\n\
+         Do not create or modify Linear data unless a later step explicitly asks for it and approval allows it.\n\n{}",
+        meeting.video_id,
+        serde_json::to_string_pretty(&normalized)
+            .unwrap_or_else(|_| "{\"source\":\"bluedot\"}".to_string())
     )
 }
 
@@ -1594,6 +1644,82 @@ async fn run_gateway_chat_with_tools(
     Box::pin(crate::agent::process_message(config, message, session_id)).await
 }
 
+async fn run_gateway_named_agent(
+    state: &AppState,
+    agent_name: &str,
+    message: &str,
+) -> anyhow::Result<String> {
+    let config = state.config.lock().clone();
+    let security = Arc::new(SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
+    let runtime: Arc<dyn runtime::RuntimeAdapter> =
+        Arc::from(runtime::create_runtime(&config.runtime)?);
+    let (composio_key, composio_entity_id) = if config.composio.enabled {
+        (
+            config.composio.api_key.as_deref(),
+            Some(config.composio.entity_id.as_str()),
+        )
+    } else {
+        (None, None)
+    };
+    let config_arc = Arc::new(config.clone());
+    let resolved_agents = config.resolve_delegate_agents_map(&config.agents)?;
+    let (_, delegate_handle, _, _, _, _) = tools::all_tools_with_runtime(
+        Arc::clone(&config_arc),
+        &security,
+        runtime,
+        state.mem.clone(),
+        composio_key,
+        composio_entity_id,
+        &config.browser,
+        &config.http_request,
+        &config.web_fetch,
+        &config.workspace_dir,
+        &resolved_agents,
+        config.api_key.as_deref(),
+        &config,
+        Some(state.canvas_store.clone()),
+    );
+    let parent_tools = delegate_handle
+        .with_context(|| format!("No delegate agent registry is available for '{agent_name}'"))?;
+    let fallback_credential = config.api_key.as_deref().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    });
+    let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
+    let delegate_tool = tools::DelegateTool::new_with_options(
+        resolved_agents,
+        fallback_credential,
+        security,
+        provider_runtime_options,
+    )
+    .with_parent_tools(parent_tools)
+    .with_multimodal_config(config.multimodal.clone())
+    .with_delegate_config(config.delegate.clone())
+    .with_workspace_dir(config.workspace_dir.clone())
+    .with_memory(state.mem.clone());
+
+    let result = delegate_tool
+        .execute(serde_json::json!({
+            "agent": agent_name,
+            "prompt": message,
+        }))
+        .await?;
+
+    if result.success {
+        Ok(result.output)
+    } else {
+        anyhow::bail!(
+            "{}",
+            result
+                .error
+                .unwrap_or_else(|| format!("Named agent '{agent_name}' failed"))
+        );
+    }
+}
+
 /// Webhook request body
 #[derive(serde::Deserialize)]
 pub struct WebhookBody {
@@ -2339,11 +2465,21 @@ async fn handle_bluedot_webhook(
         return (StatusCode::TOO_MANY_REQUESTS, Json(err));
     }
 
-    let (enabled, webhook_secret, db_path, retention_days, max_meetings) = {
+    let (
+        enabled,
+        webhook_secret,
+        automation_enabled,
+        automation_agent,
+        db_path,
+        retention_days,
+        max_meetings,
+    ) = {
         let config = state.config.lock();
         (
             bluedot_webhook_enabled(&config),
             resolve_bluedot_webhook_secret(&config),
+            bluedot_webhook_automation_enabled(&config),
+            normalize_webhook_automation_agent(config.bluedot.webhook_automation_agent.as_deref()),
             config.bluedot.db_path.clone(),
             config.bluedot.retention_days,
             config.bluedot.max_meetings,
@@ -2441,16 +2577,149 @@ async fn handle_bluedot_webhook(
 
     match store.upsert_webhook_payload(&payload) {
         Ok(meeting) => {
+            let delivery_id = (!svix_id.trim().is_empty()).then_some(svix_id);
             tracing::info!(
                 "Bluedot webhook stored {} for video {}",
                 payload.event_type.as_deref().unwrap_or("unknown"),
                 meeting.video_id
             );
+
+            if state.auto_save {
+                let key = bluedot_webhook_memory_key(delivery_id);
+                let normalized = serde_json::json!({
+                    "source": "bluedot",
+                    "delivery_id": delivery_id,
+                    "event": payload.event_type,
+                    "video_id": meeting.video_id,
+                    "meeting_id": meeting.meeting_id,
+                    "title": meeting.title,
+                    "created_at": meeting.created_at,
+                    "duration_secs": meeting.duration_secs,
+                    "attendees": meeting.attendees,
+                    "summary_present": meeting.summary.as_ref().is_some_and(|value| !value.trim().is_empty()),
+                    "transcript_entries": meeting.transcript.len(),
+                });
+                if let Ok(content) = serde_json::to_string_pretty(&normalized) {
+                    let _ = state
+                        .mem
+                        .store(
+                            &key,
+                            &content,
+                            MemoryCategory::Custom("bluedot_webhook".to_string()),
+                            None,
+                        )
+                        .await;
+                }
+            }
+
+            let automation_enqueued = automation_enabled && payload.is_transcript_ready_event();
+            if automation_enqueued {
+                let state_for_task = state.clone();
+                let payload_for_task = payload.clone();
+                let meeting_for_task = meeting.clone();
+                let automation_agent_for_task = automation_agent.clone();
+                let delivery_id_for_task = delivery_id.map(str::to_owned);
+                let automation_id = delivery_id_for_task
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                let automation_session_id = format!("bluedot_webhook_auto_{automation_id}");
+                let automation_result_key =
+                    format!("bluedot_webhook_automation_result_{automation_id}");
+                let automation_message = build_bluedot_webhook_automation_message(
+                    delivery_id_for_task.as_deref(),
+                    &payload_for_task,
+                    &meeting_for_task,
+                );
+
+                tracing::info!(
+                    delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+                    event = payload_for_task.event_type.as_deref().unwrap_or(""),
+                    video_id = %meeting_for_task.video_id,
+                    automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
+                    "Bluedot webhook automation enqueued"
+                );
+
+                let semaphore = state_for_task.webhook_automation_semaphore.clone();
+                tokio::spawn(async move {
+                    let _permit = match semaphore.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::error!("Webhook automation semaphore closed");
+                            return;
+                        }
+                    };
+                    let automation_result = match automation_agent_for_task.as_deref() {
+                        Some(agent_name) => {
+                            run_gateway_named_agent(
+                                &state_for_task,
+                                agent_name,
+                                &automation_message,
+                            )
+                            .await
+                        }
+                        None => {
+                            run_gateway_chat_with_tools(
+                                &state_for_task,
+                                &automation_message,
+                                Some(&automation_session_id),
+                            )
+                            .await
+                        }
+                    };
+                    match automation_result {
+                        Ok(response) => {
+                            tracing::info!(
+                                delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+                                session_id = %automation_session_id,
+                                video_id = %meeting_for_task.video_id,
+                                automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
+                                "Bluedot webhook automation completed"
+                            );
+                            if state_for_task.auto_save
+                                && !memory::should_skip_autosave_content(&response)
+                            {
+                                let content = serde_json::json!({
+                                    "source": "bluedot",
+                                    "delivery_id": delivery_id_for_task,
+                                    "event": payload_for_task.event_type,
+                                    "video_id": meeting_for_task.video_id,
+                                    "meeting_id": meeting_for_task.meeting_id,
+                                    "title": meeting_for_task.title,
+                                    "response": response,
+                                });
+                                if let Ok(serialized) = serde_json::to_string_pretty(&content) {
+                                    let _ = state_for_task
+                                        .mem
+                                        .store(
+                                            &automation_result_key,
+                                            &serialized,
+                                            MemoryCategory::Custom(
+                                                "bluedot_webhook_automation".to_string(),
+                                            ),
+                                            Some(&automation_session_id),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
+                                session_id = %automation_session_id,
+                                video_id = %meeting_for_task.video_id,
+                                automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
+                                "Bluedot webhook automation failed: {error:#}"
+                            );
+                        }
+                    }
+                });
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "status": "ok",
                     "video_id": meeting.video_id,
+                    "automation_enqueued": automation_enqueued,
                 })),
             )
         }
@@ -2502,12 +2771,20 @@ async fn handle_linear_webhook(
         return (StatusCode::TOO_MANY_REQUESTS, Json(err));
     }
 
-    let (enabled, webhook_secret, automation_enabled, automation_events, automation_issue_prefixes) = {
+    let (
+        enabled,
+        webhook_secret,
+        automation_enabled,
+        automation_agent,
+        automation_events,
+        automation_issue_prefixes,
+    ) = {
         let config = state.config.lock();
         (
             linear_webhook_enabled(&config),
             resolve_linear_webhook_secret(&config),
             linear_webhook_automation_enabled(&config),
+            normalize_webhook_automation_agent(config.linear.webhook_automation_agent.as_deref()),
             config.linear.webhook_automation_events.clone(),
             config.linear.webhook_automation_issue_prefixes.clone(),
         )
@@ -2646,6 +2923,7 @@ async fn handle_linear_webhook(
         let state_for_task = state.clone();
         let delivery_id_for_task = delivery_id.clone();
         let linear_event_for_task = linear_event.clone();
+        let automation_agent_for_task = automation_agent.clone();
         let automation_message = build_linear_webhook_automation_message(
             delivery_id_for_task.as_deref(),
             linear_event_for_task.as_deref(),
@@ -2665,6 +2943,7 @@ async fn handle_linear_webhook(
             linear_event = linear_event_for_task.as_deref().unwrap_or(""),
             action = action_for_task.as_deref().unwrap_or(""),
             entity_type = event_type_for_task.as_deref().unwrap_or(""),
+            automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
             "Linear webhook automation enqueued"
         );
 
@@ -2677,17 +2956,25 @@ async fn handle_linear_webhook(
                     return;
                 }
             };
-            match run_gateway_chat_with_tools(
-                &state_for_task,
-                &automation_message,
-                Some(&automation_session_id),
-            )
-            .await
-            {
+            let automation_result = match automation_agent_for_task.as_deref() {
+                Some(agent_name) => {
+                    run_gateway_named_agent(&state_for_task, agent_name, &automation_message).await
+                }
+                None => {
+                    run_gateway_chat_with_tools(
+                        &state_for_task,
+                        &automation_message,
+                        Some(&automation_session_id),
+                    )
+                    .await
+                }
+            };
+            match automation_result {
                 Ok(response) => {
                     tracing::info!(
                         delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
                         session_id = %automation_session_id,
+                        automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
                         "Linear webhook automation completed"
                     );
                     if state_for_task.auto_save && !memory::should_skip_autosave_content(&response)
@@ -2718,6 +3005,7 @@ async fn handle_linear_webhook(
                     tracing::error!(
                         delivery_id = delivery_id_for_task.as_deref().unwrap_or(""),
                         session_id = %automation_session_id,
+                        automation_agent = automation_agent_for_task.as_deref().unwrap_or(""),
                         "Linear webhook automation failed: {error:#}"
                     );
                 }
@@ -4090,6 +4378,22 @@ mod tests {
         assert!(message.contains("\"identifier\": \"JB-1\""));
     }
 
+    #[test]
+    fn bluedot_webhook_automation_message_directs_linear_lookup() {
+        let payload: BluedotWebhookPayload =
+            serde_json::from_str(&bluedot_transcript_payload()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("bluedot.db");
+        let store = BluedotMeetingStore::new(&db_path.to_string_lossy(), 365, 100).unwrap();
+        let meeting = store.upsert_webhook_payload(&payload).unwrap();
+        let message = build_bluedot_webhook_automation_message(Some("msg-123"), &payload, &meeting);
+
+        assert!(message.contains("verified Bluedot transcript webhook"));
+        assert!(message.contains("bluedot_meeting tool"));
+        assert!(message.contains("Linear issues or projects"));
+        assert!(message.contains("video-123"));
+    }
+
     #[tokio::test]
     async fn linear_webhook_returns_not_found_when_not_configured() {
         let state = linear_webhook_test_state(Config::default(), Arc::new(MockMemory));
@@ -4380,6 +4684,93 @@ mod tests {
         );
         assert_eq!(meeting.transcript.len(), 2);
         assert_eq!(meeting.attendees.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bluedot_webhook_automation_enqueues_only_for_transcript_events() {
+        let secret = generate_svix_secret();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.bluedot.webhook_enabled = true;
+        config.bluedot.webhook_secret = Some(secret.clone());
+        config.bluedot.webhook_automation_enabled = true;
+        config.bluedot.db_path = tmp.path().join("bluedot.db").to_string_lossy().to_string();
+        let state = linear_webhook_test_state(config, Arc::new(MockMemory));
+
+        let summary_body = bluedot_summary_payload();
+        let summary_timestamp = current_unix_timestamp_millis() / 1000;
+        let summary_signature = compute_bluedot_signature(
+            &secret,
+            "msg-summary-auto",
+            summary_timestamp,
+            &summary_body,
+        );
+        let mut summary_headers = HeaderMap::new();
+        summary_headers.insert("svix-id", HeaderValue::from_static("msg-summary-auto"));
+        summary_headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&summary_timestamp.to_string()).unwrap(),
+        );
+        summary_headers.insert(
+            "svix-signature",
+            HeaderValue::from_str(&summary_signature).unwrap(),
+        );
+
+        let summary_response = handle_bluedot_webhook(
+            State(state.clone()),
+            test_connect_info(),
+            summary_headers,
+            Bytes::from(summary_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary_payload = summary_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let summary_json: serde_json::Value = serde_json::from_slice(&summary_payload).unwrap();
+        assert_eq!(summary_json["automation_enqueued"], false);
+
+        let transcript_body = bluedot_transcript_payload();
+        let transcript_timestamp = current_unix_timestamp_millis() / 1000;
+        let transcript_signature = compute_bluedot_signature(
+            &secret,
+            "msg-transcript-auto",
+            transcript_timestamp,
+            &transcript_body,
+        );
+        let mut transcript_headers = HeaderMap::new();
+        transcript_headers.insert("svix-id", HeaderValue::from_static("msg-transcript-auto"));
+        transcript_headers.insert(
+            "svix-timestamp",
+            HeaderValue::from_str(&transcript_timestamp.to_string()).unwrap(),
+        );
+        transcript_headers.insert(
+            "svix-signature",
+            HeaderValue::from_str(&transcript_signature).unwrap(),
+        );
+
+        let transcript_response = handle_bluedot_webhook(
+            State(state),
+            test_connect_info(),
+            transcript_headers,
+            Bytes::from(transcript_body),
+        )
+        .await
+        .into_response();
+        assert_eq!(transcript_response.status(), StatusCode::OK);
+        let transcript_payload = transcript_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let transcript_json: serde_json::Value =
+            serde_json::from_slice(&transcript_payload).unwrap();
+        assert_eq!(transcript_json["automation_enqueued"], true);
     }
 
     fn compute_nextcloud_signature_hex(secret: &str, random: &str, body: &str) -> String {

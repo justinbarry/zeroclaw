@@ -120,6 +120,18 @@ impl BluedotWebhookPayload {
             })
     }
 
+    pub fn is_transcript_ready_event(&self) -> bool {
+        self.event_type
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|event_type| {
+                matches!(
+                    event_type,
+                    "video.transcript.created" | "meeting.transcript.created"
+                )
+            })
+    }
+
     pub fn summary_text(&self) -> Option<String> {
         trimmed_owned(self.summary.as_deref()).or_else(|| trimmed_owned(self.summary_v2.as_deref()))
     }

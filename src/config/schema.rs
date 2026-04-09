@@ -635,9 +635,12 @@ impl Default for DelegateToolConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Configurable)]
 #[prefix = "delegate-agent"]
 pub struct DelegateAgentConfig {
-    /// Provider name (e.g. "ollama", "openrouter", "anthropic")
+    /// Provider name (e.g. "ollama", "openrouter", "anthropic").
+    /// When unset or empty, inherits `default_provider`.
+    #[serde(default)]
     pub provider: String,
-    /// Model name
+    /// Model name. When unset or empty, inherits `default_model`.
+    #[serde(default)]
     pub model: String,
     /// Optional system prompt for the sub-agent
     #[serde(default)]
@@ -8627,6 +8630,7 @@ impl Default for JiraConfig {
 /// - `timeout_secs`: `30`
 /// - `webhook_enabled`: `false`
 /// - `webhook_automation_enabled`: `false`
+/// - `webhook_automation_agent`: unset
 ///
 /// ## Auth
 /// Linear personal API keys are sent in the `Authorization` header without a
@@ -8667,6 +8671,10 @@ pub struct LinearConfig {
     /// Enable background agent execution for matching Linear webhook events.
     #[serde(default)]
     pub webhook_automation_enabled: bool,
+    /// Optional named agent profile to run for Linear webhook automation.
+    /// When unset, the primary gateway agent handles automation.
+    #[serde(default)]
+    pub webhook_automation_agent: Option<String>,
     /// Linear event filters to trigger automation, for example `"Issue"` or
     /// `"Issue:create"`.
     #[serde(default)]
@@ -8712,6 +8720,7 @@ impl Default for LinearConfig {
             webhook_enabled: false,
             webhook_secret: None,
             webhook_automation_enabled: false,
+            webhook_automation_agent: None,
             webhook_automation_events: Vec::new(),
             webhook_automation_issue_prefixes: Vec::new(),
         }
@@ -8731,6 +8740,8 @@ impl Default for LinearConfig {
 /// ## Defaults
 /// - `enabled`: `false`
 /// - `webhook_enabled`: `false`
+/// - `webhook_automation_enabled`: `false`
+/// - `webhook_automation_agent`: unset
 /// - `allowed_actions`: `["recent", "get", "search", "transcript"]`
 /// - `db_path`: `"~/.zeroclaw/bluedot-meetings.db"`
 /// - `retention_days`: `365`
@@ -8749,6 +8760,13 @@ pub struct BluedotConfig {
     #[serde(default)]
     #[secret]
     pub webhook_secret: Option<String>,
+    /// Enable background agent execution for transcript-ready Bluedot webhooks.
+    #[serde(default)]
+    pub webhook_automation_enabled: bool,
+    /// Optional named agent profile to run for Bluedot webhook automation.
+    /// When unset, the primary gateway agent handles automation.
+    #[serde(default)]
+    pub webhook_automation_agent: Option<String>,
     /// Allowed `bluedot_meeting` tool actions.
     /// Valid values: `"recent"`, `"get"`, `"search"`, `"transcript"`.
     #[serde(default = "default_bluedot_allowed_actions")]
@@ -8791,6 +8809,8 @@ impl Default for BluedotConfig {
             enabled: false,
             webhook_enabled: false,
             webhook_secret: None,
+            webhook_automation_enabled: false,
+            webhook_automation_agent: None,
             allowed_actions: default_bluedot_allowed_actions(),
             db_path: default_bluedot_db_path(),
             retention_days: default_bluedot_retention_days(),
@@ -9828,6 +9848,69 @@ impl Config {
         }
     }
 
+    fn resolve_delegate_agent_provider(&self, agent: &DelegateAgentConfig) -> Option<String> {
+        let provider = {
+            let value = agent.provider.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
+
+        provider.or_else(|| {
+            self.default_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    }
+
+    fn resolve_delegate_agent_model(&self, agent: &DelegateAgentConfig) -> Option<String> {
+        let model = {
+            let value = agent.model.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
+
+        model.or_else(|| {
+            self.default_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    }
+
+    pub(crate) fn resolve_delegate_agent_config(
+        &self,
+        name: &str,
+        agent: &DelegateAgentConfig,
+    ) -> Result<DelegateAgentConfig> {
+        let provider = self.resolve_delegate_agent_provider(agent).ok_or_else(|| {
+            anyhow::anyhow!(
+                "agents.{name}.provider is unset and no root default_provider is configured"
+            )
+        })?;
+        let model = self.resolve_delegate_agent_model(agent).ok_or_else(|| {
+            anyhow::anyhow!("agents.{name}.model is unset and no root default_model is configured")
+        })?;
+
+        let mut resolved = agent.clone();
+        resolved.provider = provider;
+        resolved.model = model;
+        Ok(resolved)
+    }
+
+    pub(crate) fn resolve_delegate_agents_map(
+        &self,
+        agents: &HashMap<String, DelegateAgentConfig>,
+    ) -> Result<HashMap<String, DelegateAgentConfig>> {
+        agents
+            .iter()
+            .map(|(name, agent)| {
+                self.resolve_delegate_agent_config(name, agent)
+                    .map(|resolved| (name.clone(), resolved))
+            })
+            .collect()
+    }
+
     /// Validate configuration values that would cause runtime failures.
     ///
     /// Called after TOML deserialization and env-override application to catch
@@ -10448,6 +10531,18 @@ impl Config {
                 );
             }
         }
+        if let Some(agent_name) = self.linear.webhook_automation_agent.as_deref() {
+            let agent_name = agent_name.trim();
+            if agent_name.is_empty() {
+                anyhow::bail!("linear.webhook_automation_agent must not be empty when set");
+            }
+            if !self.agents.contains_key(agent_name) {
+                anyhow::bail!(
+                    "linear.webhook_automation_agent refers to unknown agent '{}'",
+                    agent_name
+                );
+            }
+        }
 
         // Bluedot
         if self.bluedot.enabled || self.bluedot.webhook_enabled {
@@ -10490,6 +10585,23 @@ impl Config {
                 "bluedot.webhook_secret must be set (or BLUEDOT_WEBHOOK_SECRET env var) when bluedot.webhook_enabled = true"
             );
         }
+        if self.bluedot.webhook_automation_enabled && !self.bluedot.webhook_enabled {
+            anyhow::bail!(
+                "bluedot.webhook_automation_enabled requires bluedot.webhook_enabled = true"
+            );
+        }
+        if let Some(agent_name) = self.bluedot.webhook_automation_agent.as_deref() {
+            let agent_name = agent_name.trim();
+            if agent_name.is_empty() {
+                anyhow::bail!("bluedot.webhook_automation_agent must not be empty when set");
+            }
+            if !self.agents.contains_key(agent_name) {
+                anyhow::bail!(
+                    "bluedot.webhook_automation_agent refers to unknown agent '{}'",
+                    agent_name
+                );
+            }
+        }
 
         // Nevis IAM — delegate to NevisConfig::validate() for field-level checks
         if let Err(msg) = self.security.nevis.validate() {
@@ -10499,6 +10611,7 @@ impl Config {
         // Delegate agent timeouts
         const MAX_DELEGATE_TIMEOUT_SECS: u64 = 3600;
         for (name, agent) in &self.agents {
+            self.resolve_delegate_agent_config(name, agent)?;
             if let Some(timeout) = agent.timeout_secs {
                 if timeout == 0 {
                     anyhow::bail!("agents.{name}.timeout_secs must be greater than 0");
@@ -16213,6 +16326,78 @@ require_otp_to_resume = true
         assert!(err.contains("linear.webhook_automation_issue_prefixes"));
     }
 
+    #[tokio::test]
+    async fn config_validate_accepts_linear_webhook_named_agent() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+        cfg.linear.webhook_automation_enabled = true;
+        cfg.linear.webhook_automation_events = vec!["Issue:create".into()];
+        cfg.agents.insert(
+            "project_manager".into(),
+            DelegateAgentConfig {
+                provider: "openrouter".into(),
+                model: "model".into(),
+                ..DelegateAgentConfig::default()
+            },
+        );
+        cfg.linear.webhook_automation_agent = Some("project_manager".into());
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn config_validate_accepts_agent_inheriting_root_provider_and_model() {
+        let mut cfg = Config::default();
+        cfg.agents.insert(
+            "project_manager".into(),
+            DelegateAgentConfig {
+                system_prompt: Some("inherit root model".into()),
+                ..DelegateAgentConfig::default()
+            },
+        );
+
+        assert!(cfg.validate().is_ok());
+
+        let resolved = cfg.resolve_delegate_agents_map(&cfg.agents).unwrap();
+        let project_manager = resolved.get("project_manager").unwrap();
+        assert_eq!(
+            project_manager.provider,
+            cfg.default_provider.clone().unwrap()
+        );
+        assert_eq!(project_manager.model, cfg.default_model.clone().unwrap());
+    }
+
+    #[tokio::test]
+    async fn config_validate_rejects_agent_inheritance_without_root_defaults() {
+        let mut cfg = Config::default();
+        cfg.default_provider = None;
+        cfg.default_model = None;
+        cfg.agents.insert(
+            "project_manager".into(),
+            DelegateAgentConfig {
+                system_prompt: Some("inherit root model".into()),
+                ..DelegateAgentConfig::default()
+            },
+        );
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("agents.project_manager.provider"));
+    }
+
+    #[tokio::test]
+    async fn config_validate_rejects_linear_webhook_unknown_agent() {
+        let mut cfg = Config::default();
+        cfg.linear.webhook_enabled = true;
+        cfg.linear.webhook_secret = Some("linear-webhook-secret".into());
+        cfg.linear.webhook_automation_enabled = true;
+        cfg.linear.webhook_automation_events = vec!["Issue:create".into()];
+        cfg.linear.webhook_automation_agent = Some("project_manager".into());
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("linear.webhook_automation_agent"));
+    }
+
     #[test]
     async fn config_validate_accepts_bluedot_webhook_with_secret() {
         let mut cfg = Config::default();
@@ -16240,6 +16425,56 @@ require_otp_to_resume = true
 
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("bluedot.allowed_actions"));
+    }
+
+    #[test]
+    async fn config_validate_accepts_bluedot_webhook_automation() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+        cfg.bluedot.webhook_automation_enabled = true;
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_webhook_automation_without_webhook() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_automation_enabled = true;
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.webhook_automation_enabled requires"));
+    }
+
+    #[test]
+    async fn config_validate_accepts_bluedot_webhook_named_agent() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+        cfg.bluedot.webhook_automation_enabled = true;
+        cfg.agents.insert(
+            "project_manager".into(),
+            DelegateAgentConfig {
+                provider: "openrouter".into(),
+                model: "model".into(),
+                ..DelegateAgentConfig::default()
+            },
+        );
+        cfg.bluedot.webhook_automation_agent = Some("project_manager".into());
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    async fn config_validate_rejects_bluedot_webhook_unknown_agent() {
+        let mut cfg = Config::default();
+        cfg.bluedot.webhook_enabled = true;
+        cfg.bluedot.webhook_secret = Some("whsec_test".into());
+        cfg.bluedot.webhook_automation_enabled = true;
+        cfg.bluedot.webhook_automation_agent = Some("project_manager".into());
+
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("bluedot.webhook_automation_agent"));
     }
 
     // ── Bootstrap files ─────────────────────────────────────

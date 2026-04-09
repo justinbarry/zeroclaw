@@ -39,6 +39,7 @@ allowed_actions = [
 ]
 webhook_enabled = true
 webhook_automation_enabled = true
+webhook_automation_agent = "project_manager"
 webhook_automation_events = ["Issue:create", "Issue:update", "Comment"]
 webhook_automation_issue_prefixes = ["JB"]
 
@@ -58,6 +59,8 @@ Notes:
 - `LINEAR_API_KEY` overrides `linear.api_key`.
 - `LINEAR_WEBHOOK_SECRET` overrides `linear.webhook_secret`.
 - `always_ask = ["linear.write"]` keeps all Linear issue, project, comment, and document writes approval-gated, including raw `graphql_mutation`.
+- `webhook_automation_agent = "project_manager"` runs the named agent profile instead of the primary gateway agent.
+- If `[agents.project_manager]` omits `provider` and `model`, it inherits the root `default_provider` and `default_model`, so the same Codex setup can drive both the main agent and webhook subagent.
 - `webhook_automation_issue_prefixes = ["JB"]` limits background automation to issues like `JB-123`.
 
 ## 3. Gateway endpoint

@@ -265,8 +265,8 @@ Delegate sub-agent configurations. Each key under `[agents]` defines a named sub
 
 | Key | Default | Purpose |
 |---|---|---|
-| `provider` | _required_ | Provider name (e.g. `"ollama"`, `"openrouter"`, `"anthropic"`) |
-| `model` | _required_ | Model name for the sub-agent |
+| `provider` | inherits `default_provider` | Provider name override for the sub-agent |
+| `model` | inherits `default_model` | Model name override for the sub-agent |
 | `system_prompt` | unset | Optional system prompt override for the sub-agent |
 | `api_key` | unset | Optional API key override (stored encrypted when `secrets.encrypt = true`) |
 | `temperature` | unset | Temperature override for the sub-agent |
@@ -285,6 +285,8 @@ Notes:
 - The `delegate` tool is excluded from sub-agent allowlists to prevent re-entrant delegation loops.
 - Sub-agents receive an enriched system prompt containing: tools section (allowed tools with parameters), skills section (from scoped or default directory), workspace path, current date/time, safety constraints, and shell policy when `shell` is in the effective tool list.
 - When `skills_directory` is unset or empty, the sub-agent loads skills from the default workspace `skills/` directory. When set, skills are loaded exclusively from that directory (relative to workspace root), enabling per-agent scoped skill sets.
+- `linear.webhook_automation_agent` and `bluedot.webhook_automation_agent` can point at one of these named agents for event-driven workflows.
+- When `provider` and `model` are omitted, the sub-agent inherits the primary agent's `default_provider` and `default_model`. That lets a Codex-based setup reuse the main provider without repeating it per agent.
 
 ```toml
 [agents.researcher]
@@ -310,6 +312,14 @@ system_prompt = "You are an expert code reviewer focused on security and perform
 agentic = true
 allowed_tools = ["file_read", "shell"]
 skills_directory = "skills/code-review"
+
+[agents.project_manager]
+system_prompt = "You are a project manager. Map meetings to existing Linear work, identify blockers, summarize status, and avoid mutations unless approval is granted."
+agentic = true
+allowed_tools = ["bluedot_meeting", "linear", "memory_store", "memory_recall"]
+max_iterations = 8
+agentic_timeout_secs = 600
+memory_namespace = "project_manager"
 ```
 
 ## `[runtime]`
@@ -520,6 +530,7 @@ Notes:
 | `webhook_enabled` | `false` | Enable passive webhook ingestion on `POST /linear` |
 | `webhook_secret` | unset | Linear webhook signing secret |
 | `webhook_automation_enabled` | `false` | Enable background agent execution for matching webhooks |
+| `webhook_automation_agent` | unset | Optional named agent profile to run for webhook automation |
 | `webhook_automation_events` | `[]` | Event filters such as `Issue` or `Issue:create` |
 | `webhook_automation_issue_prefixes` | `[]` | Optional issue-prefix scope such as `JB` |
 
@@ -535,6 +546,7 @@ Notes:
 - `graphql_query` is read-only and rejects mutation documents.
 - `graphql_mutation` is treated as a write operation and follows the same approval path as curated writes.
 - `webhook_automation_enabled = true` requires both `webhook_enabled = true` and at least one value in `webhook_automation_events`.
+- When `webhook_automation_agent` is set, webhook automation runs that named agent profile instead of the primary gateway agent.
 - When `webhook_automation_issue_prefixes` is non-empty, automation only runs for matching issue identifiers such as `JB-123`.
 
 Recommended production setup:
@@ -544,6 +556,7 @@ Recommended production setup:
 enabled = true
 webhook_enabled = true
 webhook_automation_enabled = true
+webhook_automation_agent = "project_manager"
 webhook_automation_events = ["Issue:create", "Issue:update", "Comment"]
 webhook_automation_issue_prefixes = ["JB"]
 ```
@@ -557,6 +570,8 @@ See [linear-setup.md](../../setup-guides/linear-setup.md) for the end-to-end set
 | `enabled` | `false` | Enable the `bluedot_meeting` tool |
 | `webhook_enabled` | `false` | Enable signed Bluedot ingestion on `POST /bluedot` |
 | `webhook_secret` | unset | Svix signing secret for Bluedot webhooks |
+| `webhook_automation_enabled` | `false` | Run the agent after transcript-ready webhooks to inspect the meeting and look for related Linear items |
+| `webhook_automation_agent` | unset | Optional named agent profile to run for Bluedot webhook automation |
 | `allowed_actions` | full read set | Allowed `bluedot_meeting` actions |
 | `db_path` | `~/.zeroclaw/bluedot-meetings.db` | SQLite database path for stored meetings |
 | `retention_days` | `365` | Prune meetings older than this many days |
@@ -574,7 +589,10 @@ Notes:
 - `BLUEDOT_WEBHOOK_SECRET` overrides `webhook_secret` when set.
 - The Bluedot database is separate from the standard memory backend.
 - `search` matches against title, summary, transcript text, and attendee text.
-- V1 is passive ingest plus query tooling only. No automatic agent dispatch runs on new meetings.
+- `webhook_automation_enabled = true` requires `webhook_enabled = true`.
+- Automation only triggers for transcript-created Bluedot events, not summary-only events.
+- The automation prompt tells the agent to inspect the stored meeting and search Linear issues/projects with the available tools.
+- When `webhook_automation_agent` is set, transcript-ready automation runs that named agent profile instead of the primary gateway agent.
 
 Recommended setup:
 
@@ -582,6 +600,8 @@ Recommended setup:
 [bluedot]
 enabled = true
 webhook_enabled = true
+webhook_automation_enabled = true
+webhook_automation_agent = "project_manager"
 allowed_actions = ["recent", "get", "search", "transcript"]
 db_path = "~/.zeroclaw/bluedot-meetings.db"
 retention_days = 365

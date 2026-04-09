@@ -956,39 +956,49 @@ pub fn all_tools_with_runtime(
     let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
         None
     } else {
-        let delegate_agents: HashMap<String, DelegateAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
-        let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
-        let delegate_tool = DelegateTool::new_with_options(
-            delegate_agents,
-            delegate_fallback_credential.clone(),
-            security.clone(),
-            provider_runtime_options.clone(),
-        )
-        .with_parent_tools(Arc::clone(&parent_tools))
-        .with_multimodal_config(root_config.multimodal.clone())
-        .with_delegate_config(root_config.delegate.clone())
-        .with_workspace_dir(workspace_dir.to_path_buf())
-        .with_memory(memory.clone());
-        tool_arcs.push(Arc::new(delegate_tool));
-        Some(parent_tools)
+        let delegate_agents = match root_config.resolve_delegate_agents_map(agents) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!("delegate tool disabled due to invalid agent config: {error}");
+                HashMap::new()
+            }
+        };
+        if delegate_agents.is_empty() {
+            None
+        } else {
+            let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
+            let delegate_tool = DelegateTool::new_with_options(
+                delegate_agents,
+                delegate_fallback_credential.clone(),
+                security.clone(),
+                provider_runtime_options.clone(),
+            )
+            .with_parent_tools(Arc::clone(&parent_tools))
+            .with_multimodal_config(root_config.multimodal.clone())
+            .with_delegate_config(root_config.delegate.clone())
+            .with_workspace_dir(workspace_dir.to_path_buf())
+            .with_memory(memory.clone());
+            tool_arcs.push(Arc::new(delegate_tool));
+            Some(parent_tools)
+        }
     };
 
     // Add swarm tool when swarms are configured
     if !root_config.swarms.is_empty() {
-        let swarm_agents: HashMap<String, DelegateAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
-        tool_arcs.push(Arc::new(SwarmTool::new(
-            root_config.swarms.clone(),
-            swarm_agents,
-            delegate_fallback_credential,
-            security.clone(),
-            provider_runtime_options,
-        )));
+        match root_config.resolve_delegate_agents_map(agents) {
+            Ok(swarm_agents) => {
+                tool_arcs.push(Arc::new(SwarmTool::new(
+                    root_config.swarms.clone(),
+                    swarm_agents,
+                    delegate_fallback_credential,
+                    security.clone(),
+                    provider_runtime_options,
+                )));
+            }
+            Err(error) => {
+                tracing::warn!("swarm tool disabled due to invalid agent config: {error}");
+            }
+        }
     }
 
     // Workspace management tool (conditionally registered when workspace isolation is enabled)
