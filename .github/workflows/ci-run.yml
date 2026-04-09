@@ -20,7 +20,7 @@ env:
 jobs:
   build:
     name: Build Linux x86_64 Artifact
-    runs-on: ubicloud-standard-16
+    runs-on: ubicloud-standard-30
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -32,23 +32,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
-      - name: Ensure mold linker is available
-        run: |
-          if command -v mold >/dev/null 2>&1; then
-            echo "mold already installed"
-          else
-            sudo apt-get update -qq
-            sudo apt-get install -y mold
-          fi
-
       - name: Ensure web/dist placeholder exists
         run: mkdir -p web/dist && touch web/dist/.gitkeep
 
       - name: Build current head
         run: cargo build --profile ci --locked --target "${TARGET}"
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Package artifact
         shell: bash
