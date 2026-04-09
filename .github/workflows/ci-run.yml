@@ -20,7 +20,7 @@ env:
 jobs:
   build:
     name: Build Linux x86_64 Artifact
-    runs-on: ubicloud-standard-8
+    runs-on: ubicloud-standard-16
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -32,10 +32,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
-      - name: Install mold linker
+      - name: Ensure mold linker is available
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y mold
+          if command -v mold >/dev/null 2>&1; then
+            echo "mold already installed"
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y mold
+          fi
 
       - name: Ensure web/dist placeholder exists
         run: mkdir -p web/dist && touch web/dist/.gitkeep

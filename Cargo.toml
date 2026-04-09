@@ -315,7 +315,8 @@ codegen-units = 8    # Parallel codegen for faster builds on powerful machines (
 
 [profile.ci]
 inherits = "release"
-lto = "thin"         # Much faster than fat LTO; still catches release-mode issues
+lto = false          # CI artifacts favor throughput over cross-crate optimization
+opt-level = 2        # Keep the binary optimized enough to run well without size-first compile cost
 codegen-units = 16   # Full parallelism for CI runners
 
 [profile.dist]

@@ -22,7 +22,7 @@ Use this with:
 
 ## What It Produces
 
-`ci-run.yml` builds the current commit on the `ubicloud-standard-8` runner, packages the `zeroclaw` binary into a tarball, generates a SHA-256 file, and uploads both as an Actions artifact.
+`ci-run.yml` builds the current commit on the `ubicloud-standard-16` runner, packages the `zeroclaw` binary into a tarball, generates a SHA-256 file, and uploads both as an Actions artifact.
 
 Artifact format:
 
