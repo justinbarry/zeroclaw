@@ -43,8 +43,31 @@ Notes:
 - `webhook_automation_agent = "project_manager"` runs that named agent profile instead of the primary gateway agent.
 - `webhook_automation_title_keywords` and `webhook_automation_attendee_emails` let you scope the PM workflow to specific meeting titles and participants.
 - If `[agents.project_manager]` omits `provider` and `model`, it inherits the root `default_provider` and `default_model`, which is the right setup when the main agent already runs on Codex.
-- The automation prompt tells the agent to inspect the meeting via `bluedot_meeting`, look for related Linear issues or projects, and return a short PM-style assessment with explicit write recommendations.
+- The gateway only passes a thin Bluedot event envelope. Put the real PM policy, output contract, and write guidance in `[agents.project_manager].system_prompt`.
 - For the Linear lookup to work, enable the `linear` tool and allow read actions such as `search_issues` and `search_projects`.
+
+Recommended `project_manager` prompt:
+
+```toml
+[agents.project_manager]
+system_prompt = """
+You are a project manager.
+Map meetings to existing Linear work, identify blockers, summarize status, and avoid mutations unless approval is granted.
+Prefer read-only lookups first.
+Return five short sections titled exactly:
+- Likely Project
+- Related Issues
+- Risks/Blockers
+- Suggested Follow-up
+- Write Recommendation
+In Write Recommendation, state whether a Linear comment, document update, issue update, or no write is warranted.
+"""
+agentic = true
+allowed_tools = ["bluedot_meeting", "linear", "memory_store", "memory_recall"]
+max_iterations = 8
+agentic_timeout_secs = 600
+memory_namespace = "project_manager"
+```
 
 ## 3. Gateway endpoint
 

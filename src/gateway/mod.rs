@@ -532,12 +532,8 @@ fn build_bluedot_webhook_automation_message(
     format!(
         "A verified Bluedot transcript webhook was received.\n\
          Use the bluedot_meeting tool to inspect the meeting for video_id `{}`.\n\
-         Look for related Linear issues or projects using the available Linear tools.\n\
-         Prefer read-only Linear lookups such as search_issues, get_issue, search_projects, and get_project.\n\
-         Respond with five short sections titled exactly: Likely Project, Related Issues, Risks/Blockers, Suggested Follow-up, Write Recommendation.\n\
-         In Write Recommendation, state whether a Linear comment, document update, issue update, or no write is warranted.\n\
-         If nothing relevant is found, say that explicitly in Likely Project and Related Issues.\n\
-         Do not create or modify Linear data unless a later step explicitly asks for it and approval allows it.\n\n{}",
+         Use the available tools to analyze the meeting and decide whether any configured follow-up is warranted.\n\
+         Treat the JSON below as the event envelope for this run.\n\n{}",
         meeting.video_id,
         serde_json::to_string_pretty(&normalized)
             .unwrap_or_else(|_| "{\"source\":\"bluedot\"}".to_string())
@@ -4549,9 +4545,8 @@ mod tests {
 
         assert!(message.contains("verified Bluedot transcript webhook"));
         assert!(message.contains("bluedot_meeting tool"));
-        assert!(message.contains("Linear issues or projects"));
-        assert!(message.contains("Likely Project"));
-        assert!(message.contains("Write Recommendation"));
+        assert!(message.contains("configured follow-up"));
+        assert!(message.contains("event envelope"));
         assert!(message.contains("video-123"));
     }
 
