@@ -253,6 +253,85 @@ fn normalize_webhook_automation_agent(agent_name: Option<&str>) -> Option<String
         .map(ToOwned::to_owned)
 }
 
+/// Post an automation summary to Slack if configured.
+async fn notify_slack_automation(
+    state: &AppState,
+    source: &str,
+    summary: &str,
+    context: &str,
+) {
+    let (channel_id, bot_token) = {
+        let cfg = state.config.lock();
+        let ch = match cfg.bluedot.automation_notify_slack_channel.as_deref() {
+            Some(ch) => ch,
+            None => return,
+        };
+        let token = match cfg
+            .channels_config
+            .slack
+            .as_ref()
+            .map(|s| s.bot_token.clone())
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => t,
+            None => {
+                tracing::warn!("Slack automation notify: bot_token not available");
+                return;
+            }
+        };
+        (ch.to_string(), token)
+    };
+
+    // Truncate to Slack message limit (40,000 chars), leave room for header.
+    let max_body = 39_000;
+    let truncated = if summary.len() > max_body {
+        format!("{}\n\n... (truncated)", &summary[..max_body])
+    } else {
+        summary.to_string()
+    };
+
+    let text = format!("🤖 *{source} Automation*\n{context}\n\n{truncated}");
+
+    let client = reqwest::Client::new();
+    match client
+        .post("https://slack.com/api/chat.postMessage")
+        .bearer_auth(&bot_token)
+        .json(&serde_json::json!({"channel": channel_id, "text": text}))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                if parsed.get("ok") == Some(&serde_json::Value::Bool(true)) {
+                    tracing::info!(
+                        channel = %channel_id,
+                        source = %source,
+                        "Slack automation notification posted"
+                    );
+                } else {
+                    tracing::warn!(
+                        channel = %channel_id,
+                        error = %parsed["error"],
+                        "Slack automation notify API error"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    channel = %channel_id,
+                    status = %status,
+                    "Slack automation notify HTTP error"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Slack automation notify request failed");
+        }
+    }
+}
+
 fn linear_webhook_automation_enabled(config: &Config) -> bool {
     config.linear.webhook_automation_enabled
 }
@@ -2746,7 +2825,7 @@ async fn handle_bluedot_webhook(
                                     "video_id": meeting_for_task.video_id,
                                     "meeting_id": meeting_for_task.meeting_id,
                                     "title": meeting_for_task.title,
-                                    "response": response,
+                                    "response": response.clone(),
                                 });
                                 if let Ok(serialized) = serde_json::to_string_pretty(&content) {
                                     let _ = state_for_task
@@ -2762,6 +2841,15 @@ async fn handle_bluedot_webhook(
                                         .await;
                                 }
                             }
+
+                            // Notify Slack channel if configured
+                            let title = meeting_for_task.title.clone();
+                            notify_slack_automation(
+                                &state_for_task,
+                                "Bluedot",
+                                &response,
+                                &format!("Meeting: {}", title),
+                            ).await;
                         }
                         Err(error) => {
                             tracing::error!(
@@ -3047,7 +3135,7 @@ async fn handle_linear_webhook(
                             "action": action_for_task,
                             "type": event_type_for_task,
                             "url": url_for_task,
-                            "response": response,
+                            "response": response.clone(),
                         });
                         if let Ok(serialized) = serde_json::to_string_pretty(&content) {
                             let _ = state_for_task
@@ -3061,6 +3149,16 @@ async fn handle_linear_webhook(
                                 .await;
                         }
                     }
+
+                    // Notify Slack channel if configured
+                    let event_label = linear_event_for_task.as_deref().unwrap_or("unknown");
+                    let action_label = action_for_task.as_deref().unwrap_or("");
+                    notify_slack_automation(
+                        &state_for_task,
+                        "Linear",
+                        &response,
+                        &format!("Event: {} {}", event_label, action_label),
+                    ).await;
                 }
                 Err(error) => {
                     tracing::error!(

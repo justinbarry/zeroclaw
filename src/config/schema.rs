@@ -8779,6 +8779,11 @@ pub struct BluedotConfig {
     /// When non-empty, at least one normalized attendee must match.
     #[serde(default)]
     pub webhook_automation_attendee_emails: Vec<String>,
+    /// Slack channel ID to post automation summaries to (e.g. "C01ABCDEF").
+    /// When set, the agent will post a summary of each Bluedot meeting analysis
+    /// and Linear webhook automation result to this channel.
+    #[serde(default)]
+    pub automation_notify_slack_channel: Option<String>,
     /// Allowed `bluedot_meeting` tool actions.
     /// Valid values: `"recent"`, `"get"`, `"search"`, `"transcript"`.
     #[serde(default = "default_bluedot_allowed_actions")]
@@ -8825,6 +8830,7 @@ impl Default for BluedotConfig {
             webhook_automation_agent: None,
             webhook_automation_title_keywords: Vec::new(),
             webhook_automation_attendee_emails: Vec::new(),
+            automation_notify_slack_channel: None,
             allowed_actions: default_bluedot_allowed_actions(),
             db_path: default_bluedot_db_path(),
             retention_days: default_bluedot_retention_days(),
