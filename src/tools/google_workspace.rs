@@ -402,10 +402,6 @@ impl Tool for GoogleWorkspaceTool {
             cmd.env("GOOGLE_APPLICATION_CREDENTIALS", creds);
         }
 
-        // Apply default account if configured
-        if let Some(ref account) = self.default_account {
-            cmd.args(["--account", account]);
-        }
 
         if self.audit_log {
             tracing::info!(
